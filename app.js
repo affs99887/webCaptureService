@@ -55,66 +55,17 @@ app.post('/screenshot', async (req, res) => {
         console.log('Navigating to page...');
         await page.goto(url, { waitUntil: 'networkidle0', timeout: 60000 });
 
-        console.log('Waiting for dynamic content...');
-        await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 2000)));
-
-        console.log('Adjusting viewport...');
-        const bodyHeight = await page.evaluate(() => {
-            return Math.max(
-                document.body.scrollHeight,
-                document.documentElement.scrollHeight,
-                document.body.offsetHeight,
-                document.documentElement.offsetHeight,
-                document.body.clientHeight,
-                document.documentElement.clientHeight
-            );
-        });
-
-        await page.setViewport({
-            ...device.viewport,
-            height: bodyHeight
-        });
-
-        console.log('Scrolling page...');
-        await page.evaluate(async () => {
-            await new Promise(resolve => {
-                let totalHeight = 0;
-                const distance = 100;
-                const timer = setInterval(() => {
-                    window.scrollBy(0, distance);
-                    totalHeight += distance;
-
-                    if(totalHeight >= document.body.scrollHeight){
-                        clearInterval(timer);
-                        resolve();
-                    }
-                }, 100);
-            });
-        });
-
-        await page.evaluate(() => {
-            window.scrollTo(0, 0);
-        });
-
-        await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 1000)));
-
-        console.log('Capturing screenshot...');
-        const screenshot = await page.screenshot({
-            fullPage: true,
-            encoding: 'base64'
-        });
+        console.log('Processing and capturing page...');
+        const screenshot = await captureFullPage(page);
 
         await browser.close();
 
-        console.log(`Screenshot captured. Base64 length: ${screenshot.length}`);
-
-        // 创建包含base64数据的文本内容
-        const textContent = `data:image/png;base64,${screenshot}`;
+        console.log('Screenshot captured successfully');
 
         res.setHeader('Content-Type', 'text/plain');
         res.setHeader('Content-Disposition', `attachment; filename=screenshot-${deviceName}.txt`);
 
-        res.send(textContent);
+        res.send(screenshot);
 
         console.log('Screenshot base64 sent successfully as text file');
     } catch (err) {
@@ -122,6 +73,77 @@ app.post('/screenshot', async (req, res) => {
         res.status(500).send('Failed to capture full page mobile screenshot: ' + err.message);
     }
 });
+
+async function captureFullPage(page) {
+    // 滚动到底部以触发懒加载内容
+    await autoScroll(page);
+
+    // 慢慢滚动回顶部，同时观察页面高度变化
+    let maxHeight = await getPageHeight(page);
+    await slowScrollToTop(page, async (currentHeight) => {
+        if (currentHeight > maxHeight) {
+            maxHeight = currentHeight;
+            console.log(`New max height: ${maxHeight}`);
+        }
+    });
+
+    // 设置足够大的视口高度
+    await page.setViewport({
+        width: page.viewport().width,
+        height: maxHeight
+    });
+
+    // 再次滚动到底部确保所有内容都已加载
+    await autoScroll(page);
+
+    // 捕获整个页面的截图
+    console.log(`Capturing screenshot with height: ${maxHeight}`);
+    const screenshot = await page.screenshot({
+        fullPage: true,
+        encoding: 'base64'
+    });
+
+    return `data:image/png;base64,${screenshot}`;
+}
+
+async function autoScroll(page) {
+    await page.evaluate(async () => {
+        await new Promise((resolve) => {
+            let totalHeight = 0;
+            const distance = 100;
+            const timer = setInterval(() => {
+                const scrollHeight = document.documentElement.scrollHeight;
+                window.scrollBy(0, distance);
+                totalHeight += distance;
+
+                if (totalHeight >= scrollHeight) {
+                    clearInterval(timer);
+                    resolve();
+                }
+            }, 100);
+        });
+    });
+}
+
+async function slowScrollToTop(page, callback) {
+    await page.evaluate(async (cb) => {
+        await new Promise((resolve) => {
+            const distance = -50;  // 向上滚动
+            const timer = setInterval(() => {
+                window.scrollBy(0, distance);
+                if (window.pageYOffset <= 0) {
+                    clearInterval(timer);
+                    resolve();
+                }
+                cb(document.documentElement.scrollHeight);
+            }, 100);
+        });
+    }, callback);
+}
+
+async function getPageHeight(page) {
+    return page.evaluate(() => document.documentElement.scrollHeight);
+}
 
 // 生成PDF
 app.post('/pdf', async (req, res) => {
