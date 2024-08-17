@@ -112,17 +112,16 @@ async function autoScroll(page) {
     await page.evaluate(async () => {
         await new Promise((resolve) => {
             let totalHeight = 0;
-            const distance = 100;
+            const distance = 300;  // 增加滚动距离
             const timer = setInterval(() => {
-                const scrollHeight = document.documentElement.scrollHeight;
                 window.scrollBy(0, distance);
                 totalHeight += distance;
 
-                if (totalHeight >= scrollHeight) {
+                if (totalHeight >= document.body.scrollHeight) {
                     clearInterval(timer);
                     resolve();
                 }
-            }, 100);
+            }, 50);  // 减少间隔时间
         });
     });
 }
