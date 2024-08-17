@@ -193,7 +193,6 @@ app.post('/pdf', async (req, res) => {
         const pdfOptions = {
             width: `${device.viewport.width}px`,
             printBackground: true,
-            pageRanges: '1-1', // 只生成一页
         };
 
         const pdf = await page.pdf(pdfOptions);
