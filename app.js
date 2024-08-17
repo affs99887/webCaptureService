@@ -1,5 +1,7 @@
 const express = require('express');
 const puppeteer = require('puppeteer');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(express.json());
@@ -147,25 +149,86 @@ async function getPageHeight(page) {
 
 // 生成PDF
 app.post('/pdf', async (req, res) => {
-    const { url } = req.body;
+    const { url, filename, deviceName = 'iPhone X' } = req.body;
 
     if (!url) {
         return res.status(400).send('URL is required');
     }
 
-    try {
-        const browser = await puppeteer.launch();
-        const page = await browser.newPage();
-        await page.goto(url, { waitUntil: 'networkidle2' });
+    if (!filename) {
+        return res.status(400).send('Filename is required');
+    }
 
-        const pdf = await page.pdf({ format: 'A4' });
+    try {
+        console.log(`Starting PDF generation for ${url} on ${deviceName}`);
+
+        const browser = await puppeteer.launch({
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+        });
+        const page = await browser.newPage();
+
+        const device = mobileDevices[deviceName];
+        if (!device) {
+            throw new Error(`Device "${deviceName}" not found`);
+        }
+
+        await page.setUserAgent(device.userAgent);
+        await page.setViewport(device.viewport);
+
+        // 捕获控制台日志
+        page.on('console', msg => console.log('PAGE LOG:', msg.text()));
+
+        console.log('Navigating to page...');
+        await page.goto(url, {
+            waitUntil: 'networkidle0',
+            timeout: 60000  // 60 seconds
+        });
+
+        console.log('Processing and capturing full page...');
+        await captureFullPage(page);
+
+        console.log('Generating PDF...');
+
+        // 设置 PDF 选项，使用设备的宽度
+        const pdfOptions = {
+            width: `${device.viewport.width}px`,
+            printBackground: true,
+            pageRanges: '1-1', // 只生成一页
+        };
+
+        const pdf = await page.pdf(pdfOptions);
+
+        console.log('PDF generated successfully');
+
         await browser.close();
 
-        res.set('Content-Type', 'application/pdf');
-        res.send(pdf);
+        // 定义保存PDF的目录
+        const pdfDir = path.join(__dirname, 'pdfs');
+
+        // 如果目录不存在，创建它
+        if (!fs.existsSync(pdfDir)) {
+            fs.mkdirSync(pdfDir, { recursive: true });
+        }
+
+        // 构建完整的文件路径
+        const filePath = path.join(pdfDir, filename);
+
+        // 将PDF保存到文件
+        fs.writeFileSync(filePath, pdf);
+
+        console.log(`PDF saved successfully to ${filePath}`);
+
+        res.status(200).json({ message: 'PDF generated and saved successfully', filePath });
     } catch (err) {
-        console.error(err);
-        res.status(500).send('Failed to generate PDF');
+        console.error('Error details:', err);
+
+        // 尝试获取更多错误信息
+        let errorInfo = err.message;
+        if (err.stack) {
+            errorInfo += '\n\nStack trace:\n' + err.stack;
+        }
+
+        res.status(500).send('Failed to generate PDF: ' + errorInfo);
     }
 });
 
