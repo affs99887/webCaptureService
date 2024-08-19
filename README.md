@@ -15,17 +15,7 @@ WebCaptureService 是一个基于 Node.js 的应用程序，提供网页截图�
 
 ## 安装步骤
 
-1. **克隆仓库**：
-   ```bash
-   git clone https://github.com/yourusername/webcaptureservice.git
-   ```
-
-2. **进入项目目录**：
-   ```bash
-   cd webcaptureservice
-   ```
-
-3. **安装依赖**：
+**安装依赖**：
    ```bash
    npm install
    ```
