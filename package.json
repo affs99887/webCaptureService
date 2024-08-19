@@ -2,11 +2,24 @@
   "name": "webcaptureservice",
   "version": "0.0.0",
   "private": true,
+  "main": "app.js",
+  "bin": "app.js",
   "engines": {
     "node": ">=18.16.0"
   },
   "scripts": {
     "start": "node app.js"
+  },
+  "pkg": {
+    "targets": ["node18-win-x64"],
+    "outputPath": "dist",
+    "assets": [
+      "node_modules/puppeteer/.local-chromium/**/*"
+    ],
+    "ignore": [
+      "node_modules/puppeteer/.local-chromium/**/*",
+      "node_modules/typed-query-selector/shim.d.ts"
+    ]
   },
   "dependencies": {
     "cookie-parser": "~1.4.4",
