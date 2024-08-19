@@ -33,13 +33,35 @@ const mobileDevices = {
     // 你可以在这里添加更多设备
 };
 
-// 生成网页截图并返回 base64
+// 处理文件名和路径的辅助函数
+function processFilename(filename, extension, dirName) {
+    // 移除任何现有的文件扩展名
+    let baseName = path.basename(filename, path.extname(filename));
+
+    // 添加正确的扩展名
+    let fullFilename = `${baseName}.${extension}`;
+
+    // 创建目录（如果不存在）
+    let dir = path.join(process.cwd(), dirName);
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
+
+    // 返回完整的文件路径
+    return path.join(dir, fullFilename);
+}
+
+// 生成网页截图
 app.post('/screenshot', async (req, res) => {
-    const { url, deviceName = 'iPhone X' } = req.body;
+    const { url, filename, deviceName = 'iPhone X' } = req.body;
 
     if (!url) {
         return res.status(400).send('URL is required');
     }
+    if (!filename) {
+        return res.status(400).send('Filename is required');
+    }
+
     try {
         console.log(`Starting screenshot capture for ${url} on ${deviceName}`);
 
@@ -55,24 +77,33 @@ app.post('/screenshot', async (req, res) => {
         await page.setViewport(device.viewport);
 
         console.log('Navigating to page...');
-        await page.goto(url, { waitUntil: 'networkidle0', timeout: 60000 });
+        await page.goto(url, {waitUntil: 'networkidle0', timeout: 60000});
 
         console.log('Processing and capturing page...');
         const screenshot = await captureFullPage(page);
 
         await browser.close();
 
-        console.log('Screenshot captured successfully');
+        const filePath = processFilename(filename, 'png', 'screenshots');
 
-        res.setHeader('Content-Type', 'text/plain');
-        res.setHeader('Content-Disposition', `attachment; filename=screenshot-${deviceName}.txt`);
+        // 将base64截图数据转换为buffer并保存为文件
+        const base64Data = screenshot.replace(/^data:image\/png;base64,/, "");
+        fs.writeFileSync(filePath, base64Data, 'base64');
 
-        res.send(screenshot);
+        console.log(`Screenshot saved successfully to ${filePath}`);
 
-        console.log('Screenshot base64 sent successfully as text file');
+        res.status(200).json({
+            message: 'Screenshot generated and saved successfully',
+            filePath,
+            fileName: path.basename(filePath)
+        });
     } catch (err) {
         console.error('Error details:', err);
-        res.status(500).send('Failed to capture full page mobile screenshot: ' + err.message);
+        let errorInfo = err.message;
+        if (err.stack) {
+            errorInfo += '\n\nStack trace:\n' + err.stack;
+        }
+        res.status(500).send('Failed to capture full page mobile screenshot: ' + errorInfo);
     }
 });
 
@@ -148,7 +179,7 @@ async function getPageHeight(page) {
 
 // 生成PDF
 app.post('/pdf', async (req, res) => {
-    const { url, filename, deviceName = 'iPhone X' } = req.body;
+    const {url, filename, deviceName = 'iPhone X'} = req.body;
 
     if (!url) {
         return res.status(400).send('URL is required');
@@ -168,19 +199,18 @@ app.post('/pdf', async (req, res) => {
 
         const device = mobileDevices[deviceName];
         if (!device) {
-            throw new Error(`Device "${deviceName}" not found`);
+            throw new Error(`Device "${deviceName}" not found, now available devices are [iPhone X] or [Pixel 2] (Pay attention to capitalization and spaces)`);
         }
 
         await page.setUserAgent(device.userAgent);
         await page.setViewport(device.viewport);
 
-        // 捕获控制台日志
         page.on('console', msg => console.log('PAGE LOG:', msg.text()));
 
         console.log('Navigating to page...');
         await page.goto(url, {
             waitUntil: 'networkidle0',
-            timeout: 60000  // 60 seconds
+            timeout: 60000
         });
 
         console.log('Processing and capturing full page...');
@@ -188,7 +218,6 @@ app.post('/pdf', async (req, res) => {
 
         console.log('Generating PDF...');
 
-        // 设置 PDF 选项，使用设备的宽度
         const pdfOptions = {
             width: `${device.viewport.width}px`,
             printBackground: true,
@@ -200,32 +229,23 @@ app.post('/pdf', async (req, res) => {
 
         await browser.close();
 
-        // 定义保存PDF的目录
-        const pdfDir = path.join(__dirname, 'pdfs');
+        const filePath = processFilename(filename, 'pdf', 'pdfs');
 
-        // 如果目录不存在，创建它
-        if (!fs.existsSync(pdfDir)) {
-            fs.mkdirSync(pdfDir, { recursive: true });
-        }
-
-        // 构建完整的文件路径
-        const filePath = path.join(pdfDir, filename);
-
-        // 将PDF保存到文件
         fs.writeFileSync(filePath, pdf);
 
         console.log(`PDF saved successfully to ${filePath}`);
 
-        res.status(200).json({ message: 'PDF generated and saved successfully', filePath });
+        res.status(200).json({
+            message: 'PDF generated and saved successfully',
+            filePath,
+            fileName: path.basename(filePath)
+        });
     } catch (err) {
         console.error('Error details:', err);
-
-        // 尝试获取更多错误信息
         let errorInfo = err.message;
         if (err.stack) {
             errorInfo += '\n\nStack trace:\n' + err.stack;
         }
-
         res.status(500).send('Failed to generate PDF: ' + errorInfo);
     }
 });
