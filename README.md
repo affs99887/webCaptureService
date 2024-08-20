@@ -43,7 +43,7 @@ npm start
     "deviceName": "iPhone X"
   }
   ```
-- **响应**: 返回 Base64 编码的截图文件内容
+- **响应**: 返回包含消息和文件路径的 JSON 对象，文件保存在 'screenshots' 文件目录下
 
 #### 2. 生成 PDF
 
@@ -57,7 +57,7 @@ npm start
     "deviceName": "iPhone X"
   }
   ```
-- **响应**: 返回包含消息和文件路径的 JSON 对象
+- **响应**: 返回包含消息和文件路径的 JSON 对象，文件保存在 'pdf' 文件目录下
 
 ### 支持的设备
 
