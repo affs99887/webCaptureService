@@ -3,6 +3,9 @@ const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
 
+const chromiumExecutablePath = path.join(process.cwd(), 'chrome-win64', 'chrome.exe');
+
+
 const app = express();
 app.use(express.json());
 
@@ -75,7 +78,9 @@ app.post('/screenshot', async (req, res) => {
     try {
         console.log(`Starting screenshot capture for ${url} on ${deviceName}`);
 
-        const browser = await puppeteer.launch();
+        const browser = await puppeteer.launch({
+            executablePath: chromiumExecutablePath
+        });
         const page = await browser.newPage();
 
         const device = mobileDevices[deviceName];
@@ -203,7 +208,8 @@ app.post('/pdf', async (req, res) => {
         console.log(`Starting PDF generation for ${url} on ${deviceName}`);
 
         const browser = await puppeteer.launch({
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+            args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            executablePath: chromiumExecutablePath
         });
         const page = await browser.newPage();
 

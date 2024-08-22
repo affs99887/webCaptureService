@@ -8,23 +8,21 @@
     "node": ">=18.16.0"
   },
   "scripts": {
-    "start": "node app.js"
+    "start": "node app.js",
+    "build": "pkg . --public"
   },
   "pkg": {
-    "targets": ["node18-win-x64"],
     "outputPath": "dist",
-    "assets": [
-      "node_modules/puppeteer/.local-chromium/**/*"
-    ],
-    "ignore": [
-      "node_modules/puppeteer/.local-chromium/**/*",
-      "node_modules/typed-query-selector/shim.d.ts"
-    ]
+    "options": {
+      "preBundle": true
+    }
   },
   "dependencies": {
+    "chrome-launcher": "^1.1.2",
     "cookie-parser": "~1.4.4",
     "debug": "~2.6.9",
     "express": "~4.16.1",
-    "puppeteer": "^23.1.0"
+    "puppeteer": "^23.1.0",
+    "puppeteer-core": "^23.1.1"
   }
 }
