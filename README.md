@@ -22,12 +22,11 @@ WebCaptureService 是一个基于 Node.js 的应用程序，提供网页截图�
 
 ## 使用指南
 
-### 启动服务器
+1. 安装依赖：`npm install`
+2. 启动服务器：`npm start`
+3. 服务器将在首次运行时自动下载 Chrome
+4. 访问 http://localhost:3000 使用应用
 
-使用以下命令启动服务器：
-```bash
-npm start
-```
 服务器将默认运行在 `3000` 端口上，您也可以通过 `PORT` 环境变量来指定端口。
 
 ### API 端点
