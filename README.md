@@ -62,8 +62,14 @@ npm start
 ### 支持的设备
 
 预设设备包括：
+
+(手机端页面)
 - iPhone X
 - Pixel 2
+
+（桌面页面）
+
+- iPad Pro
 
 您可以在代码中的 `mobileDevices` 对象中添加更多设备配置。
 
@@ -82,6 +88,12 @@ npm start
    ```
 
 生成的可执行文件将存放在 `dist` 目录中。
+
+## 已知问题
+
+### 报错 ReferenceError: ReadableStream is not defined
+
+请升级nodejs版本，项目使用的版本为18.16.0，请至少升级到该版本以上
 
 ## 许可证
 
