@@ -236,8 +236,6 @@ app.post('/pdf', async (req, res) => {
         await page.setUserAgent(device.userAgent);
         await page.setViewport(viewport);
 
-        page.on('console', msg => console.log('PAGE LOG:', msg.text()));
-
         console.log('Navigating to page...');
         await page.goto(url, {
             waitUntil: 'networkidle0',
