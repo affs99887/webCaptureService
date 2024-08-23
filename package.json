@@ -12,6 +12,7 @@
     "build": "pkg . --public"
   },
   "pkg": {
+    "targets": ["node18-win-x64"],
     "outputPath": "dist",
     "options": {
       "preBundle": true
