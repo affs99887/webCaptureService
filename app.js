@@ -2,9 +2,9 @@ const express = require('express');
 const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 
 const chromiumExecutablePath = path.join(process.cwd(), 'chrome-win64', 'chrome.exe');
-
 
 const app = express();
 app.use(express.json());
@@ -57,7 +57,7 @@ function processFilename(filename, extension, dirName) {
     // 创建目录（如果不存在）
     let dir = path.join(process.cwd(), dirName);
     if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+        fs.mkdirSync(dir, {recursive: true});
     }
 
     // 返回完整的文件路径
@@ -66,13 +66,16 @@ function processFilename(filename, extension, dirName) {
 
 // 生成网页截图
 app.post('/screenshot', async (req, res) => {
-    const { url, filename, deviceName = 'iPhone X' } = req.body;
+    const {url, filename, deviceName = 'iPad Pro', width} = req.body;
 
     if (!url) {
         return res.status(400).send('URL is required');
     }
     if (!filename) {
         return res.status(400).send('Filename is required');
+    }
+    if (width && isNaN(parseInt(width))) {
+        return res.status(400).send('Width must be a valid number');
     }
 
     try {
@@ -88,8 +91,13 @@ app.post('/screenshot', async (req, res) => {
             throw new Error(`Device "${deviceName}" not found`);
         }
 
+        let viewport = {...device.viewport};
+        if (width) {
+            viewport.width = parseInt(width);
+        }
+
         await page.setUserAgent(device.userAgent);
-        await page.setViewport(device.viewport);
+        await page.setViewport(viewport);
 
         console.log('Navigating to page...');
         await page.goto(url, {waitUntil: 'networkidle0', timeout: 60000});
@@ -147,7 +155,7 @@ async function captureFullPage(page) {
     // 捕获整个页面的截图
     console.log(`Capturing screenshot with height: ${maxHeight}`);
     const screenshot = await page.screenshot({
-        fullPage: true,
+        width: `${page.viewport().width}px`,
         encoding: 'base64'
     });
 
@@ -194,14 +202,16 @@ async function getPageHeight(page) {
 
 // 生成PDF
 app.post('/pdf', async (req, res) => {
-    const {url, filename, deviceName = 'iPhone X'} = req.body;
+    const {url, filename, deviceName = 'iPad Pro', width} = req.body;
 
     if (!url) {
         return res.status(400).send('URL is required');
     }
-
     if (!filename) {
         return res.status(400).send('Filename is required');
+    }
+    if (width && isNaN(parseInt(width))) {
+        return res.status(400).send('Width must be a valid number');
     }
 
     try {
@@ -218,8 +228,13 @@ app.post('/pdf', async (req, res) => {
             throw new Error(`Device "${deviceName}" not found, now available devices are [iPhone X] or [Pixel 2] (Pay attention to capitalization and spaces)`);
         }
 
+        let viewport = {...device.viewport};
+        if (width) {
+            viewport.width = parseInt(width);
+        }
+
         await page.setUserAgent(device.userAgent);
-        await page.setViewport(device.viewport);
+        await page.setViewport(viewport);
 
         page.on('console', msg => console.log('PAGE LOG:', msg.text()));
 
@@ -235,7 +250,7 @@ app.post('/pdf', async (req, res) => {
         console.log('Generating PDF...');
 
         const pdfOptions = {
-            width: `${device.viewport.width}px`,
+            width: width ? `${width}px` : `${device.viewport.width}px`,
             printBackground: true,
         };
 
@@ -266,7 +281,54 @@ app.post('/pdf', async (req, res) => {
     }
 });
 
-const PORT = process.env.PORT || 3065;
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-});
+
+function findAvailablePort(startPort) {
+    return new Promise((resolve, reject) => {
+        const server = http.createServer();
+        server.listen(startPort, () => {
+            const { port } = server.address();
+            server.close(() => {
+                resolve(port);
+            });
+        });
+        server.on('error', (err) => {
+            if (err.code === 'EADDRINUSE') {
+                findAvailablePort(startPort + 1).then(resolve, reject);
+            } else {
+                reject(err);
+            }
+        });
+    });
+}
+
+const startServer = async () => {
+    const preferredPort = process.env.PORT || 3065;
+    try {
+        const PORT = await findAvailablePort(preferredPort);
+        app.listen(PORT, () => {
+            console.log('Available device models:');
+            console.log('【当前可用的设备型号有:】');
+            Object.keys(mobileDevices).forEach(device => {
+                console.log(`- ${device} (${mobileDevices[device].viewport.width}x${mobileDevices[device].viewport.height})`);
+            });
+
+            console.log('\nEndpoints:');
+            console.log('【接口名称:】');
+            console.log('1. POST /screenshot');
+            console.log('2. POST /pdf');
+            console.log('   Required parameters: url, filename');
+            console.log('   Optional parameters: deviceName, width (If neither deviceName nor width is provided, the default is to use iPad Pro to display the desktop interface; if both deviceName and width are provided, width will take precedence).');
+            console.log('   【必填参数: url, filename】');
+            console.log('   【可选参数: deviceName, width（如果不传deviceName和width，默认使用iPad Pro展示桌面端界面；若同时传了deviceName和width，会优先使用width）】');
+
+            console.log(`\nServer is running on port ${PORT}`);
+            console.log(`【服务器正在运行在 ${PORT} 端口】`);
+        });
+    } catch (err) {
+        console.error('启动服务器失败:', err);
+    }
+};
+
+startServer();
+
+
