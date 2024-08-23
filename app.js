@@ -247,9 +247,18 @@ app.post('/pdf', async (req, res) => {
 
         console.log('Generating PDF...');
 
+        // A4 dimensions in pixels at 96 DPI
+        const a4Width = 794;
+        const a4Height = 1123;
+
+        // Calculate scale to fit content width to A4
+        let scale = Math.min(a4Width / viewport.width, 2);
+        scale = Math.max(scale, 0.1);  // Ensure scale is within [0.1, 2] range
+
         const pdfOptions = {
-            width: width ? `${width}px` : `${device.viewport.width}px`,
+            format: 'A4',
             printBackground: true,
+            scale: scale,
         };
 
         const pdf = await page.pdf(pdfOptions);
