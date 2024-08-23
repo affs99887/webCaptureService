@@ -259,6 +259,15 @@ app.post('/pdf', async (req, res) => {
             format: 'A4',
             printBackground: true,
             scale: scale,
+            displayHeaderFooter: true,
+            headerTemplate: '<span></span>',
+            footerTemplate: `
+                <div style="width: 100%; font-size: 10px; text-align: center; color: #808080; position: relative;">
+                    <span style="position: absolute; left: 0; right: 0; top: -10px;">
+                        <span class="pageNumber"></span>/<span class="totalPages"></span>
+                    </span>
+                </div>
+            `
         };
 
         const pdf = await page.pdf(pdfOptions);
