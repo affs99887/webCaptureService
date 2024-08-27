@@ -69,13 +69,31 @@ app.post('/screenshot', async (req, res) => {
     const {url, filename, deviceName = 'iPad Pro', width} = req.body;
 
     if (!url) {
-        return res.status(400).send('URL is required');
+        return res.status(400).json({
+            code: 400,
+            message: 'URL is required',
+            fileName: null,
+            success: false,
+            timestamp: Date.now()
+        });
     }
     if (!filename) {
-        return res.status(400).send('Filename is required');
+        return res.status(400).json({
+            code: 400,
+            message: 'Filename is required',
+            fileName: null,
+            success: false,
+            timestamp: Date.now()
+        });
     }
     if (width && isNaN(parseInt(width))) {
-        return res.status(400).send('Width must be a valid number');
+        return res.status(400).json({
+            code: 400,
+            message: 'Width must be a valid number',
+            fileName: null,
+            success: false,
+            timestamp: Date.now()
+        });
     }
 
     try {
@@ -116,9 +134,11 @@ app.post('/screenshot', async (req, res) => {
         console.log(`Screenshot saved successfully to ${filePath}`);
 
         res.status(200).json({
+            code: 200,
             message: 'Screenshot generated and saved successfully',
-            filePath,
-            fileName: path.basename(filePath)
+            fileName: path.basename(filePath),
+            success: true,
+            timestamp: Date.now()
         });
     } catch (err) {
         console.error('Error details:', err);
@@ -126,7 +146,13 @@ app.post('/screenshot', async (req, res) => {
         if (err.stack) {
             errorInfo += '\n\nStack trace:\n' + err.stack;
         }
-        res.status(500).send('Failed to capture full page mobile screenshot: ' + errorInfo);
+        res.status(500).json({
+            code: 500,
+            message: 'Failed to capture full page mobile screenshot: ' + errorInfo,
+            fileName: null,
+            success: false,
+            timestamp: Date.now()
+        });
     }
 });
 
@@ -202,17 +228,38 @@ async function getPageHeight(page) {
 
 // 生成PDF
 app.post('/pdf', async (req, res) => {
-    const {url, filename, deviceName = 'iPad Pro', width} = req.body;
+    const {url, filename, showPageNo = true} = req.body;
 
     if (!url) {
-        return res.status(400).send('URL is required');
+        return res.status(400).json({
+            code: 400,
+            message: 'URL is required',
+            fileName: null,
+            success: false,
+            timestamp: Date.now()
+        });
     }
     if (!filename) {
-        return res.status(400).send('Filename is required');
+        return res.status(400).json({
+            code: 400,
+            message: 'Filename is required',
+            fileName: null,
+            success: false,
+            timestamp: Date.now()
+        });
     }
-    if (width && isNaN(parseInt(width))) {
-        return res.status(400).send('Width must be a valid number');
+
+    if (typeof showPageNo !== 'boolean') {
+        return res.status(400).json({
+            code: 400,
+            message: 'showPageNo must be a boolean value',
+            fileName: null,
+            success: false,
+            timestamp: Date.now()
+        });
     }
+
+    let deviceName = 'iPad Pro'
 
     try {
         console.log(`Starting PDF generation for ${url} on ${deviceName}`);
@@ -229,9 +276,6 @@ app.post('/pdf', async (req, res) => {
         }
 
         let viewport = {...device.viewport};
-        if (width) {
-            viewport.width = parseInt(width);
-        }
 
         await page.setUserAgent(device.userAgent);
         await page.setViewport(viewport);
@@ -259,16 +303,30 @@ app.post('/pdf', async (req, res) => {
             format: 'A4',
             printBackground: true,
             scale: scale,
-            displayHeaderFooter: true,
+            displayHeaderFooter: showPageNo,
             headerTemplate: '<span></span>',
-            footerTemplate: `
-                <div style="width: 100%; font-size: 10px; text-align: center; color: #808080; position: relative;">
-                    <span style="position: absolute; left: 0; right: 0; top: -10px;">
-                        <span class="pageNumber"></span>/<span class="totalPages"></span>
-                    </span>
-                </div>
-            `
+            footerTemplate: showPageNo ? `
+        <div style="width: 100%; font-size: 10px; text-align: center; color: #808080; position: relative;">
+            <span style="position: absolute; left: 0; right: 0; top: -5px;">
+                <span class="pageNumber"></span>/<span class="totalPages"></span>
+            </span>
+        </div>
+    ` : '<span></span>'
         };
+
+        // 在生成PDF之前添加自定义样式
+        await page.evaluate(() => {
+            const style = document.createElement('style');
+            style.textContent = `
+                body, html {
+                  background-color: white !important;
+                }
+                @page {
+                  background-color: white;
+                }
+              `;
+            document.head.appendChild(style);
+        });
 
         const pdf = await page.pdf(pdfOptions);
 
@@ -283,9 +341,11 @@ app.post('/pdf', async (req, res) => {
         console.log(`PDF saved successfully to ${filePath}`);
 
         res.status(200).json({
+            code: 200,
             message: 'PDF generated and saved successfully',
-            filePath,
-            fileName: path.basename(filePath)
+            fileName: path.basename(filePath),
+            success: true,
+            timestamp: Date.now()
         });
     } catch (err) {
         console.error('Error details:', err);
@@ -293,7 +353,13 @@ app.post('/pdf', async (req, res) => {
         if (err.stack) {
             errorInfo += '\n\nStack trace:\n' + err.stack;
         }
-        res.status(500).send('Failed to generate PDF: ' + errorInfo);
+        res.status(500).json({
+            code: 500,
+            message: 'Failed to generate PDF: ' + errorInfo,
+            fileName: null,
+            success: false,
+            timestamp: Date.now()
+        });
     }
 });
 
@@ -302,7 +368,7 @@ function findAvailablePort(startPort) {
     return new Promise((resolve, reject) => {
         const server = http.createServer();
         server.listen(startPort, () => {
-            const { port } = server.address();
+            const {port} = server.address();
             server.close(() => {
                 resolve(port);
             });
@@ -331,14 +397,19 @@ const startServer = async () => {
             console.log('\nEndpoints:');
             console.log('【接口名称:】');
             console.log('1. POST /screenshot');
-            console.log('2. POST /pdf');
             console.log('   Required parameters: url, filename');
             console.log('   Optional parameters: deviceName, width (If neither deviceName nor width is provided, the default is to use iPad Pro to display the desktop interface; if both deviceName and width are provided, width will take precedence).');
             console.log('   【必填参数: url, filename】');
             console.log('   【可选参数: deviceName, width（如果不传deviceName和width，默认使用iPad Pro展示桌面端界面；若同时传了deviceName和width，会优先使用width）】');
+            console.log('2. POST /pdf');
+            console.log('   Required parameters: url, filename');
+            console.log('   Optional parameters: showPageNo (Default value is true, if there is no need for displaying page numbers, sends false).');
+            console.log('   【必填参数: url, filename】');
+            console.log('   【可选参数: showPageNo（默认为true，若不需要页码显示，则传false）】');
+
 
             console.log(`\nServer is running on port ${PORT}`);
-            console.log(`【服务器正在运行在 ${PORT} 端口】`);
+            console.log(`【服务正在运行在 ${PORT} 端口】`);
         });
     } catch (err) {
         console.error('启动服务器失败:', err);
