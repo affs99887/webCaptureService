@@ -299,6 +299,26 @@ app.post('/pdf', async (req, res) => {
         let scale = Math.min(a4Width / viewport.width, 2);
         scale = Math.max(scale, 0.1);  // Ensure scale is within [0.1, 2] range
 
+        await page.evaluate(() => {
+            const style = document.createElement('style');
+            style.textContent = `
+        @page:first {
+            margin-top: 0;
+            margin-bottom: 0;
+        }
+        
+        @page {
+            margin-top: 5mm;
+            margin-bottom: 10mm;
+        }
+        
+        body, html {
+            background-color: white !important;
+        }
+    `;
+            document.head.appendChild(style);
+        });
+
         const pdfOptions = {
             format: 'A4',
             printBackground: true,
