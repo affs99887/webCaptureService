@@ -27,24 +27,20 @@ function generateSeparator() {
 
 const logsDir = path.join(process.cwd(), 'logs');
 if (!fs.existsSync(logsDir)) {
-    fs.mkdirSync(logsDir, { recursive: true });
+    fs.mkdirSync(logsDir, {recursive: true});
 }
 
 const logger = winston.createLogger({
     level: 'info',
-    format: winston.format.combine(
-        winston.format.timestamp({
-            format: () => getBeijingTime().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
-        }),
-        winston.format.printf(({ level, message, timestamp }) => {
-            return `${timestamp} ${level}: ${message}`;
-        })
-    ),
-    transports: [
-        new winston.transports.Console(),
-        new winston.transports.File({ filename: path.join(logsDir, 'error.log'), level: 'error' }),
-        new winston.transports.File({ filename: path.join(logsDir, 'app-status.log') })
-    ],
+    format: winston.format.combine(winston.format.timestamp({
+        format: () => getBeijingTime().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})
+    }), winston.format.printf(({level, message, timestamp}) => {
+        return `${timestamp} ${level}: ${message}`;
+    })),
+    transports: [new winston.transports.Console(), new winston.transports.File({
+        filename: path.join(logsDir, 'error.log'),
+        level: 'error'
+    }), new winston.transports.File({filename: path.join(logsDir, 'app-status.log')})],
 });
 
 // 捕获未处理的异常
@@ -79,7 +75,7 @@ function logShutdown(reason) {
         const separator = generateSeparator();
         logger.info(separator);
         logger.info(`应用程序正在关闭。原因: ${reason}`);
-        logger.info(`结束时间: ${getBeijingTime().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+        logger.info(`结束时间: ${getBeijingTime().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`);
 
         // 手动结束日志记录并刷新到磁盘
         logger.end(() => {
@@ -102,41 +98,24 @@ const requestQueue = new Queue(async function (task, cb) {
     } catch (error) {
         cb(error);
     }
-}, { concurrent: 1 });
+}, {concurrent: 1});
 
 // 定义一些常用的移动设备配置
 const mobileDevices = {
     'iPhone X': {
         userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1',
         viewport: {
-            width: 375,
-            height: 812,
-            deviceScaleFactor: 3,
-            isMobile: true,
-            hasTouch: true,
-            isLandscape: false
+            width: 375, height: 812, deviceScaleFactor: 3, isMobile: true, hasTouch: true, isLandscape: false
         }
-    },
-    'Pixel 2': {
+    }, 'Pixel 2': {
         userAgent: 'Mozilla/5.0 (Linux; Android 8.0; Pixel 2 Build/OPD3.170816.012) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3765.0 Mobile Safari/537.36',
         viewport: {
-            width: 411,
-            height: 731,
-            deviceScaleFactor: 2.625,
-            isMobile: true,
-            hasTouch: true,
-            isLandscape: false
+            width: 411, height: 731, deviceScaleFactor: 2.625, isMobile: true, hasTouch: true, isLandscape: false
         }
-    },
-    'iPad Pro': {
+    }, 'iPad Pro': {
         userAgent: 'Mozilla/5.0 (iPad; CPU OS 11_0 like Mac OS X) AppleWebKit/604.1.34 (KHTML, like Gecko) Version/11.0 Mobile/15A5341f Safari/604.1',
         viewport: {
-            width: 1024,
-            height: 1366,
-            deviceScaleFactor: 2,
-            isMobile: true,
-            hasTouch: true,
-            isLandscape: false
+            width: 1024, height: 1366, deviceScaleFactor: 2, isMobile: true, hasTouch: true, isLandscape: false
         }
     }
 };
@@ -165,29 +144,17 @@ async function handleScreenshot(req, res) {
 
     if (!url) {
         return res.status(400).json({
-            code: 400,
-            message: 'URL is required',
-            fileName: null,
-            success: false,
-            timestamp: Date.now()
+            code: 400, message: 'URL is required', fileName: null, success: false, timestamp: Date.now()
         });
     }
     if (!filename) {
         return res.status(400).json({
-            code: 400,
-            message: 'Filename is required',
-            fileName: null,
-            success: false,
-            timestamp: Date.now()
+            code: 400, message: 'Filename is required', fileName: null, success: false, timestamp: Date.now()
         });
     }
     if (width && isNaN(parseInt(width))) {
         return res.status(400).json({
-            code: 400,
-            message: 'Width must be a valid number',
-            fileName: null,
-            success: false,
-            timestamp: Date.now()
+            code: 400, message: 'Width must be a valid number', fileName: null, success: false, timestamp: Date.now()
         });
     }
 
@@ -267,8 +234,7 @@ async function captureFullPage(page) {
 
     // 设置足够大的视口高度
     await page.setViewport({
-        width: page.viewport().width,
-        height: maxHeight
+        width: page.viewport().width, height: maxHeight
     });
 
     // 再次滚动到底部确保所有内容都已加载
@@ -277,8 +243,7 @@ async function captureFullPage(page) {
     // 捕获整个页面的截图
     logger.info(`Capturing screenshot with height: ${maxHeight}`);
     const screenshot = await page.screenshot({
-        width: `${page.viewport().width}px`,
-        encoding: 'base64'
+        width: `${page.viewport().width}px`, encoding: 'base64'
     });
 
     return `data:image/png;base64,${screenshot}`;
@@ -328,20 +293,12 @@ async function handlePdf(req, res) {
 
     if (!url) {
         return res.status(400).json({
-            code: 400,
-            message: 'URL is required',
-            fileName: null,
-            success: false,
-            timestamp: Date.now()
+            code: 400, message: 'URL is required', fileName: null, success: false, timestamp: Date.now()
         });
     }
     if (!filename) {
         return res.status(400).json({
-            code: 400,
-            message: 'Filename is required',
-            fileName: null,
-            success: false,
-            timestamp: Date.now()
+            code: 400, message: 'Filename is required', fileName: null, success: false, timestamp: Date.now()
         });
     }
 
@@ -361,8 +318,7 @@ async function handlePdf(req, res) {
         logger.info(`Starting PDF generation for ${url} on ${deviceName}`);
 
         const browser = await puppeteer.launch({
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
-            executablePath: chromiumExecutablePath
+            args: ['--no-sandbox', '--disable-setuid-sandbox'], executablePath: chromiumExecutablePath
         });
         const page = await browser.newPage();
 
@@ -378,8 +334,7 @@ async function handlePdf(req, res) {
 
         logger.info('Navigating to page...');
         await page.goto(url, {
-            waitUntil: 'networkidle0',
-            timeout: 60000
+            waitUntil: 'networkidle0', timeout: 60000
         });
 
         logger.info('Processing and capturing full page...');
@@ -481,19 +436,21 @@ async function handlePdf(req, res) {
 };
 
 app.post('/screenshot', (req, res) => {
-    requestQueue.push({
-        handler: handleScreenshot,
-        req: req,
-        res: res
-    });
+    // requestQueue.push({
+    //     handler: handleScreenshot,
+    //     req: req,
+    //     res: res
+    // });
+    handleScreenshot(req, res);
 });
 
 app.post('/pdf', (req, res) => {
-    requestQueue.push({
-        handler: handlePdf,
-        req: req,
-        res: res
-    });
+    // requestQueue.push({
+    //     handler: handlePdf,
+    //     req: req,
+    //     res: res
+    // });
+    handlePdf(req, res);
 });
 
 
@@ -520,7 +477,7 @@ const startServer = async () => {
     const separator = generateSeparator();
     logger.info(separator);
     logger.info('新的应用程序会话开始');
-    logger.info(`启动时间: ${getBeijingTime().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+    logger.info(`启动时间: ${getBeijingTime().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`);
 
     const preferredPort = process.env.PORT || 3065;
     try {
