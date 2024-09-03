@@ -12,18 +12,23 @@
     "build": "pkg . --public"
   },
   "pkg": {
-    "targets": ["node18-win-x64"],
+    "targets": [
+      "node18-win-x64"
+    ],
     "outputPath": "dist",
     "options": {
       "preBundle": true
     }
   },
   "dependencies": {
+    "better-queue": "^3.8.12",
     "chrome-launcher": "^1.1.2",
     "cookie-parser": "~1.4.4",
     "debug": "~2.6.9",
     "express": "~4.16.1",
+    "process": "^0.11.10",
     "puppeteer": "^23.1.0",
-    "puppeteer-core": "^23.1.1"
+    "puppeteer-core": "^23.1.1",
+    "winston": "^3.14.2"
   }
 }

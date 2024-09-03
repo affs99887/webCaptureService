@@ -3,11 +3,106 @@ const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const winston = require('winston');
+const process = require('process');
+const Queue = require('better-queue');
 
 const chromiumExecutablePath = path.join(process.cwd(), 'chrome-win64', 'chrome.exe');
 
 const app = express();
 app.use(express.json());
+
+// 配置日志功能
+
+function getBeijingTime() {
+    const now = new Date();
+    const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+    return new Date(utc + 3600000 * 8);  // 北京时间为UTC+8
+}
+
+function generateSeparator() {
+    const separatorLength = 50;
+    return '='.repeat(separatorLength);
+}
+
+const logsDir = path.join(process.cwd(), 'logs');
+if (!fs.existsSync(logsDir)) {
+    fs.mkdirSync(logsDir, { recursive: true });
+}
+
+const logger = winston.createLogger({
+    level: 'info',
+    format: winston.format.combine(
+        winston.format.timestamp({
+            format: () => getBeijingTime().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+        }),
+        winston.format.printf(({ level, message, timestamp }) => {
+            return `${timestamp} ${level}: ${message}`;
+        })
+    ),
+    transports: [
+        new winston.transports.Console(),
+        new winston.transports.File({ filename: path.join(logsDir, 'error.log'), level: 'error' }),
+        new winston.transports.File({ filename: path.join(logsDir, 'app-status.log') })
+    ],
+});
+
+// 捕获未处理的异常
+process.on('uncaughtException', async (error) => {
+    logger.error('Uncaught Exception:', error);
+    await logShutdown('Uncaught Exception');
+});
+
+// 捕获未处理的 Promise 拒绝
+process.on('unhandledRejection', async (reason, promise) => {
+    logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    await logShutdown('Unhandled Promise Rejection');
+});
+
+// 捕获 SIGINT 信号（通常是通过 Ctrl+C 终止程序）
+process.on('SIGINT', async () => {
+    logger.info('Received SIGINT signal');
+    await logShutdown('SIGINT (Ctrl+C)');
+    process.exit(0);
+});
+
+// 捕获 SIGTERM 信号（通常是系统请求终止程序）
+process.on('SIGTERM', async () => {
+    logger.info('Received SIGTERM signal');
+    await logShutdown('SIGTERM');
+    process.exit(0);
+});
+
+// 记录程序关闭的函数
+function logShutdown(reason) {
+    return new Promise((resolve) => {
+        const separator = generateSeparator();
+        logger.info(separator);
+        logger.info(`应用程序正在关闭。原因: ${reason}`);
+        logger.info(`结束时间: ${getBeijingTime().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+
+        // 手动结束日志记录并刷新到磁盘
+        logger.end(() => {
+            console.log('Logging completed');
+            setTimeout(resolve, 1000); // 给予额外的时间确保日志被写入
+        });
+    });
+}
+
+// 在程序即将退出时记录日志
+process.on('exit', (code) => {
+    logger.info(`Application exiting with code: ${code}`);
+});
+
+// 创建请求队列
+const requestQueue = new Queue(async function (task, cb) {
+    try {
+        const result = await task.handler(task.req, task.res);
+        cb(null, result);
+    } catch (error) {
+        cb(error);
+    }
+}, { concurrent: 1 });
 
 // 定义一些常用的移动设备配置
 const mobileDevices = {
@@ -65,7 +160,7 @@ function processFilename(filename, extension, dirName) {
 }
 
 // 生成网页截图
-app.post('/screenshot', async (req, res) => {
+async function handleScreenshot(req, res) {
     const {url, filename, deviceName = 'iPad Pro', width} = req.body;
 
     if (!url) {
@@ -97,7 +192,7 @@ app.post('/screenshot', async (req, res) => {
     }
 
     try {
-        console.log(`Starting screenshot capture for ${url} on ${deviceName}`);
+        logger.info(`Starting screenshot capture for ${url} on ${deviceName}`);
 
         const browser = await puppeteer.launch({
             executablePath: chromiumExecutablePath
@@ -117,10 +212,10 @@ app.post('/screenshot', async (req, res) => {
         await page.setUserAgent(device.userAgent);
         await page.setViewport(viewport);
 
-        console.log('Navigating to page...');
+        logger.info('Navigating to page...');
         await page.goto(url, {waitUntil: 'networkidle0', timeout: 60000});
 
-        console.log('Processing and capturing page...');
+        logger.info('Processing and capturing page...');
         const screenshot = await captureFullPage(page);
 
         await browser.close();
@@ -131,7 +226,7 @@ app.post('/screenshot', async (req, res) => {
         const base64Data = screenshot.replace(/^data:image\/png;base64,/, "");
         fs.writeFileSync(filePath, base64Data, 'base64');
 
-        console.log(`Screenshot saved successfully to ${filePath}`);
+        logger.info(`Screenshot saved successfully to ${filePath}`);
 
         res.status(200).json({
             code: 200,
@@ -142,6 +237,7 @@ app.post('/screenshot', async (req, res) => {
         });
     } catch (err) {
         console.error('Error details:', err);
+        logger.error('Error details:', err);
         let errorInfo = err.message;
         if (err.stack) {
             errorInfo += '\n\nStack trace:\n' + err.stack;
@@ -154,7 +250,7 @@ app.post('/screenshot', async (req, res) => {
             timestamp: Date.now()
         });
     }
-});
+};
 
 async function captureFullPage(page) {
     // 滚动到底部以触发懒加载内容
@@ -165,7 +261,7 @@ async function captureFullPage(page) {
     await slowScrollToTop(page, async (currentHeight) => {
         if (currentHeight > maxHeight) {
             maxHeight = currentHeight;
-            console.log(`New max height: ${maxHeight}`);
+            logger.info(`New max height: ${maxHeight}`);
         }
     });
 
@@ -179,7 +275,7 @@ async function captureFullPage(page) {
     await autoScroll(page);
 
     // 捕获整个页面的截图
-    console.log(`Capturing screenshot with height: ${maxHeight}`);
+    logger.info(`Capturing screenshot with height: ${maxHeight}`);
     const screenshot = await page.screenshot({
         width: `${page.viewport().width}px`,
         encoding: 'base64'
@@ -227,7 +323,7 @@ async function getPageHeight(page) {
 }
 
 // 生成PDF
-app.post('/pdf', async (req, res) => {
+async function handlePdf(req, res) {
     const {url, filename, showPageNo = true} = req.body;
 
     if (!url) {
@@ -262,7 +358,7 @@ app.post('/pdf', async (req, res) => {
     let deviceName = 'iPad Pro'
 
     try {
-        console.log(`Starting PDF generation for ${url} on ${deviceName}`);
+        logger.info(`Starting PDF generation for ${url} on ${deviceName}`);
 
         const browser = await puppeteer.launch({
             args: ['--no-sandbox', '--disable-setuid-sandbox'],
@@ -280,16 +376,16 @@ app.post('/pdf', async (req, res) => {
         await page.setUserAgent(device.userAgent);
         await page.setViewport(viewport);
 
-        console.log('Navigating to page...');
+        logger.info('Navigating to page...');
         await page.goto(url, {
             waitUntil: 'networkidle0',
             timeout: 60000
         });
 
-        console.log('Processing and capturing full page...');
+        logger.info('Processing and capturing full page...');
         await captureFullPage(page);
 
-        console.log('Generating PDF...');
+        logger.info('Generating PDF...');
 
         // A4 dimensions in pixels at 96 DPI
         const a4Width = 794;
@@ -350,7 +446,7 @@ app.post('/pdf', async (req, res) => {
 
         const pdf = await page.pdf(pdfOptions);
 
-        console.log('PDF generated successfully');
+        logger.info('PDF generated successfully');
 
         await browser.close();
 
@@ -358,7 +454,7 @@ app.post('/pdf', async (req, res) => {
 
         fs.writeFileSync(filePath, pdf);
 
-        console.log(`PDF saved successfully to ${filePath}`);
+        logger.info(`PDF saved successfully to ${filePath}`);
 
         res.status(200).json({
             code: 200,
@@ -369,6 +465,7 @@ app.post('/pdf', async (req, res) => {
         });
     } catch (err) {
         console.error('Error details:', err);
+        logger.error('Error details:', err);
         let errorInfo = err.message;
         if (err.stack) {
             errorInfo += '\n\nStack trace:\n' + err.stack;
@@ -381,6 +478,22 @@ app.post('/pdf', async (req, res) => {
             timestamp: Date.now()
         });
     }
+};
+
+app.post('/screenshot', (req, res) => {
+    requestQueue.push({
+        handler: handleScreenshot,
+        req: req,
+        res: res
+    });
+});
+
+app.post('/pdf', (req, res) => {
+    requestQueue.push({
+        handler: handlePdf,
+        req: req,
+        res: res
+    });
 });
 
 
@@ -404,10 +517,16 @@ function findAvailablePort(startPort) {
 }
 
 const startServer = async () => {
+    const separator = generateSeparator();
+    logger.info(separator);
+    logger.info('新的应用程序会话开始');
+    logger.info(`启动时间: ${getBeijingTime().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+
     const preferredPort = process.env.PORT || 3065;
     try {
         const PORT = await findAvailablePort(preferredPort);
         app.listen(PORT, () => {
+            logger.info(`Server is running on port ${PORT}`);
             console.log('Available device models:');
             console.log('【当前可用的设备型号有:】');
             Object.keys(mobileDevices).forEach(device => {
@@ -432,6 +551,7 @@ const startServer = async () => {
             console.log(`【服务正在运行在 ${PORT} 端口】`);
         });
     } catch (err) {
+        logger.error('Failed to start server:', err);
         console.error('启动服务器失败:', err);
     }
 };
