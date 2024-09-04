@@ -6,11 +6,42 @@ const http = require('http');
 const winston = require('winston');
 const process = require('process');
 const Queue = require('better-queue');
+const { Cluster } = require('puppeteer-cluster');
 
 const chromiumExecutablePath = path.join(process.cwd(), 'chrome-win64', 'chrome.exe');
 
 const app = express();
 app.use(express.json());
+
+let cluster;
+
+async function setupCluster() {
+    if (!cluster) {
+        cluster = await Cluster.launch({
+            concurrency: Cluster.CONCURRENCY_CONTEXT,
+            maxConcurrency: 10,
+            puppeteerOptions: {
+                executablePath: chromiumExecutablePath,
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu'
+                ],
+                timeout: 60000,
+                protocolTimeout: 60000
+            },
+            timeout: 120000,
+            retryLimit: 3,
+            retryDelay: 5000,
+        });
+
+        cluster.on('taskerror', (err, data) => {
+            logger.error(`Error processing task: ${err.message}`);
+        });
+    }
+    return cluster;
+}
 
 // 配置日志功能
 
@@ -58,6 +89,9 @@ process.on('unhandledRejection', async (reason, promise) => {
 // 捕获 SIGINT 信号（通常是通过 Ctrl+C 终止程序）
 process.on('SIGINT', async () => {
     logger.info('Received SIGINT signal');
+    if (cluster) {
+        await cluster.close();
+    }
     await logShutdown('SIGINT (Ctrl+C)');
     process.exit(0);
 });
@@ -65,6 +99,9 @@ process.on('SIGINT', async () => {
 // 捕获 SIGTERM 信号（通常是系统请求终止程序）
 process.on('SIGTERM', async () => {
     logger.info('Received SIGTERM signal');
+    if (cluster) {
+        await cluster.close();
+    }
     await logShutdown('SIGTERM');
     process.exit(0);
 });
@@ -160,37 +197,30 @@ async function handleScreenshot(req, res) {
 
     try {
         logger.info(`Starting screenshot capture for ${url} on ${deviceName}`);
+        const cluster = await setupCluster();
 
-        const browser = await puppeteer.launch({
-            executablePath: chromiumExecutablePath
+        const result = await cluster.execute({ url, filename, deviceName, width }, async ({ page, data }) => {
+            const device = mobileDevices[data.deviceName];
+            if (!device) {
+                throw new Error(`Device "${data.deviceName}" not found`);
+            }
+
+            let viewport = { ...device.viewport };
+            if (data.width) {
+                viewport.width = parseInt(data.width);
+            }
+
+            await page.setUserAgent(device.userAgent);
+            await page.setViewport(viewport);
+
+            await page.goto(data.url, { waitUntil: 'networkidle0', timeout: 60000 });
+
+            const screenshot = await captureFullPage(page);
+            return screenshot;
         });
-        const page = await browser.newPage();
-
-        const device = mobileDevices[deviceName];
-        if (!device) {
-            throw new Error(`Device "${deviceName}" not found`);
-        }
-
-        let viewport = {...device.viewport};
-        if (width) {
-            viewport.width = parseInt(width);
-        }
-
-        await page.setUserAgent(device.userAgent);
-        await page.setViewport(viewport);
-
-        logger.info('Navigating to page...');
-        await page.goto(url, {waitUntil: 'networkidle0', timeout: 60000});
-
-        logger.info('Processing and capturing page...');
-        const screenshot = await captureFullPage(page);
-
-        await browser.close();
 
         const filePath = processFilename(filename, 'png', 'screenshots');
-
-        // 将base64截图数据转换为buffer并保存为文件
-        const base64Data = screenshot.replace(/^data:image\/png;base64,/, "");
+        const base64Data = result.replace(/^data:image\/png;base64,/, "");
         fs.writeFileSync(filePath, base64Data, 'base64');
 
         logger.info(`Screenshot saved successfully to ${filePath}`);
@@ -312,102 +342,57 @@ async function handlePdf(req, res) {
         });
     }
 
-    let deviceName = 'iPad Pro'
-
     try {
-        logger.info(`Starting PDF generation for ${url} on ${deviceName}`);
+        logger.info(`Starting PDF generation for ${url}`);
+        const cluster = await setupCluster();
 
-        const browser = await puppeteer.launch({
-            args: ['--no-sandbox', '--disable-setuid-sandbox'], executablePath: chromiumExecutablePath
+        const result = await cluster.execute({ url, filename, showPageNo }, async ({ page, data }) => {
+            const deviceName = 'iPad Pro';
+            const device = mobileDevices[deviceName];
+
+            await page.setUserAgent(device.userAgent);
+            await page.setViewport(device.viewport);
+
+            await page.goto(data.url, { waitUntil: 'networkidle0', timeout: 60000 });
+
+            await captureFullPage(page);
+
+            const a4Width = 794;
+            const a4Height = 1123;
+            let scale = Math.min(a4Width / device.viewport.width, 2);
+            scale = Math.max(scale, 0.1);
+
+            await page.evaluate(() => {
+                const style = document.createElement('style');
+                style.textContent = `
+                    @page:first { margin-top: 0; margin-bottom: 0; }
+                    @page { margin-top: 5mm; margin-bottom: 10mm; }
+                    body, html { background-color: white !important; }
+                `;
+                document.head.appendChild(style);
+            });
+
+            const pdfOptions = {
+                format: 'A4',
+                printBackground: true,
+                scale: scale,
+                displayHeaderFooter: data.showPageNo,
+                headerTemplate: '<span></span>',
+                footerTemplate: data.showPageNo ? `
+                    <div style="width: 100%; font-size: 10px; text-align: center; color: #808080; position: relative;">
+                        <span style="position: absolute; left: 0; right: 0; top: -5px;">
+                            <span class="pageNumber"></span>/<span class="totalPages"></span>
+                        </span>
+                    </div>
+                ` : '<span></span>'
+            };
+
+            const pdf = await page.pdf(pdfOptions);
+            return pdf;
         });
-        const page = await browser.newPage();
-
-        const device = mobileDevices[deviceName];
-        if (!device) {
-            throw new Error(`Device "${deviceName}" not found, now available devices are [iPhone X] or [Pixel 2] (Pay attention to capitalization and spaces)`);
-        }
-
-        let viewport = {...device.viewport};
-
-        await page.setUserAgent(device.userAgent);
-        await page.setViewport(viewport);
-
-        logger.info('Navigating to page...');
-        await page.goto(url, {
-            waitUntil: 'networkidle0', timeout: 60000
-        });
-
-        logger.info('Processing and capturing full page...');
-        await captureFullPage(page);
-
-        logger.info('Generating PDF...');
-
-        // A4 dimensions in pixels at 96 DPI
-        const a4Width = 794;
-        const a4Height = 1123;
-
-        // Calculate scale to fit content width to A4
-        let scale = Math.min(a4Width / viewport.width, 2);
-        scale = Math.max(scale, 0.1);  // Ensure scale is within [0.1, 2] range
-
-        await page.evaluate(() => {
-            const style = document.createElement('style');
-            style.textContent = `
-        @page:first {
-            margin-top: 0;
-            margin-bottom: 0;
-        }
-        
-        @page {
-            margin-top: 5mm;
-            margin-bottom: 10mm;
-        }
-        
-        body, html {
-            background-color: white !important;
-        }
-    `;
-            document.head.appendChild(style);
-        });
-
-        const pdfOptions = {
-            format: 'A4',
-            printBackground: true,
-            scale: scale,
-            displayHeaderFooter: showPageNo,
-            headerTemplate: '<span></span>',
-            footerTemplate: showPageNo ? `
-        <div style="width: 100%; font-size: 10px; text-align: center; color: #808080; position: relative;">
-            <span style="position: absolute; left: 0; right: 0; top: -5px;">
-                <span class="pageNumber"></span>/<span class="totalPages"></span>
-            </span>
-        </div>
-    ` : '<span></span>'
-        };
-
-        // 在生成PDF之前添加自定义样式
-        await page.evaluate(() => {
-            const style = document.createElement('style');
-            style.textContent = `
-                body, html {
-                  background-color: white !important;
-                }
-                @page {
-                  background-color: white;
-                }
-              `;
-            document.head.appendChild(style);
-        });
-
-        const pdf = await page.pdf(pdfOptions);
-
-        logger.info('PDF generated successfully');
-
-        await browser.close();
 
         const filePath = processFilename(filename, 'pdf', 'pdfs');
-
-        fs.writeFileSync(filePath, pdf);
+        fs.writeFileSync(filePath, result);
 
         logger.info(`PDF saved successfully to ${filePath}`);
 
