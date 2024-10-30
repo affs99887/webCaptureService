@@ -7,10 +7,29 @@ const winston = require('winston');
 const process = require('process');
 const Queue = require('better-queue');
 const { Cluster } = require('puppeteer-cluster');
+const cors = require("cors");
+const { Readable } = require('stream');
+
 
 const chromiumExecutablePath = path.join(process.cwd(), 'chrome-win64', 'chrome.exe');
 
 const app = express();
+
+const allowedOrigins = ['http://localhost:3100']; // 允许的源
+app.use(cors({
+    origin: function (origin, callback) {
+        // 允许来自 allowedOrigins 的请求
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('不允许的 CORS 来源'));
+        }
+    },
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // 允许的方法
+    allowedHeaders: ['Content-Type', 'Authorization'], // 允许的头部
+    credentials: true, // 是否允许发送凭证
+}));
+
 app.use(express.json());
 
 let cluster;
@@ -502,15 +521,18 @@ async function handleStream(req, res) {
             return pdf;
         });
 
+        // 创建一个 Readable 流
+        const stream = Readable.from([pdfBuffer]);
+
         // 设置响应头
         res.set({
             'Content-Type': 'application/pdf',
             'Content-Disposition': `attachment; filename="${filename}.pdf"`,
-            'Content-Length': pdfBuffer.length
+            'Content-Length': pdfBuffer.length,
         });
 
-        // 发送 PDF Buffer
-        res.status(200).send(pdfBuffer);
+        // 将流通过管道发送给客户端
+        stream.pipe(res);
 
         logger.info(`PDF stream sent successfully for ${url}`);
     } catch (err) {
