@@ -420,6 +420,117 @@ async function handlePdf(req, res) {
     }
 };
 
+// 生成并返回 PDF 文件流
+async function handleStream(req, res) {
+    const { url, filename, showPageNo = true } = req.body;
+
+    if (!url) {
+        return res.status(400).json({
+            code: 400,
+            message: 'URL is required',
+            fileName: null,
+            success: false,
+            timestamp: Date.now()
+        });
+    }
+    if (!filename) {
+        return res.status(400).json({
+            code: 400,
+            message: 'Filename is required',
+            fileName: null,
+            success: false,
+            timestamp: Date.now()
+        });
+    }
+
+    if (typeof showPageNo !== 'boolean') {
+        return res.status(400).json({
+            code: 400,
+            message: 'showPageNo must be a boolean value',
+            fileName: null,
+            success: false,
+            timestamp: Date.now()
+        });
+    }
+
+    try {
+        logger.info(`Starting PDF stream generation for ${url}`);
+        const cluster = await setupCluster();
+
+        const pdfBuffer = await cluster.execute({ url, filename, showPageNo }, async ({ page, data }) => {
+            const deviceName = 'iPad Pro';
+            const device = mobileDevices[deviceName];
+
+            await page.setUserAgent(device.userAgent);
+            await page.setViewport(device.viewport);
+
+            await page.goto(data.url, { waitUntil: 'networkidle0', timeout: 60000 });
+
+            await captureFullPage(page);
+
+            const a4Width = 794;
+            const a4Height = 1123;
+            let scale = Math.min(a4Width / device.viewport.width, 2);
+            scale = Math.max(scale, 0.1);
+
+            await page.evaluate(() => {
+                const style = document.createElement('style');
+                style.textContent = `
+                    @page:first { margin-top: 0; margin-bottom: 0; }
+                    @page { margin-top: 5mm; margin-bottom: 10mm; }
+                    body, html { background-color: white !important; }
+                `;
+                document.head.appendChild(style);
+            });
+
+            const pdfOptions = {
+                format: 'A4',
+                printBackground: true,
+                scale: scale,
+                displayHeaderFooter: data.showPageNo,
+                headerTemplate: '<span></span>',
+                footerTemplate: data.showPageNo ? `
+                    <div style="width: 100%; font-size: 10px; text-align: center; color: #808080; position: relative;">
+                        <span style="position: absolute; left: 0; right: 0; top: -5px;">
+                            <span class="pageNumber"></span>/<span class="totalPages"></span>
+                        </span>
+                    </div>
+                ` : '<span></span>'
+            };
+
+            const pdf = await page.pdf(pdfOptions);
+            return pdf;
+        });
+
+        // 设置响应头
+        res.set({
+            'Content-Type': 'application/pdf',
+            'Content-Disposition': `attachment; filename="${filename}.pdf"`,
+            'Content-Length': pdfBuffer.length
+        });
+
+        // 发送 PDF Buffer
+        res.status(200).send(pdfBuffer);
+
+        logger.info(`PDF stream sent successfully for ${url}`);
+    } catch (err) {
+        console.error('Error details:', err);
+        logger.error('Error details:', err);
+        let errorInfo = err.message;
+        if (err.stack) {
+            errorInfo += '\n\nStack trace:\n' + err.stack;
+        }
+        res.status(500).json({
+            code: 500,
+            message: 'Failed to generate PDF stream: ' + errorInfo,
+            fileName: null,
+            success: false,
+            timestamp: Date.now()
+        });
+    }
+};
+
+
 app.post('/screenshot', (req, res) => {
     // requestQueue.push({
     //     handler: handleScreenshot,
@@ -437,6 +548,16 @@ app.post('/pdf', (req, res) => {
     // });
     handlePdf(req, res);
 });
+
+app.post('/pdf/stream', (req, res) => {
+    // requestQueue.push({
+    //     handler: handleStream,
+    //     req: req,
+    //     res: res
+    // });
+    handleStream(req, res);
+});
+
 
 
 function findAvailablePort(startPort) {
@@ -485,6 +606,11 @@ const startServer = async () => {
             console.log('2. POST /pdf');
             console.log('   Required parameters: url, filename');
             console.log('   Optional parameters: showPageNo (Default value is true, if there is no need for displaying page numbers, sends false).');
+            console.log('   【必填参数: url, filename】');
+            console.log('   【可选参数: showPageNo（默认为true，若不需要页码显示，则传false）】');
+            console.log('3. POST /pdf/stream');
+            console.log('   Required parameters: url, filename');
+            console.log('   Optional parameters: showPageNo (Default is true; set to false if page numbers are not needed).');
             console.log('   【必填参数: url, filename】');
             console.log('   【可选参数: showPageNo（默认为true，若不需要页码显示，则传false）】');
 
