@@ -9,7 +9,7 @@ const Queue = require('better-queue');
 const { Cluster } = require('puppeteer-cluster');
 const cors = require("cors");
 const { Readable } = require('stream');
-
+const pm2 = require('pm2');
 
 const chromiumExecutablePath = path.join(process.cwd(), 'chrome-win64', 'chrome.exe');
 
@@ -97,12 +97,16 @@ const logger = winston.createLogger({
 process.on('uncaughtException', async (error) => {
     logger.error('Uncaught Exception:', error);
     await logShutdown('Uncaught Exception');
+    // 使用 pm2 重启服务
+    restartService();
 });
 
 // 捕获未处理的 Promise 拒绝
 process.on('unhandledRejection', async (reason, promise) => {
     logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
     await logShutdown('Unhandled Promise Rejection');
+    // 使用 pm2 重启服务
+    restartService();
 });
 
 // 捕获 SIGINT 信号（通常是通过 Ctrl+C 终止程序）
@@ -646,6 +650,24 @@ const startServer = async () => {
     }
 };
 
+
+// 使用 pm2 重启服务的函数
+function restartService() {
+    pm2.connect(function(err) {
+        if (err) {
+            console.error(err);
+            process.exit(2);
+        }
+
+        pm2.restart(process.env.pm_id, function(err, apps) {
+            if (err) {
+                console.error(err);
+            } else {
+                console.log("Service restarted successfully.");
+            }
+            pm2.disconnect();   // Disconnects from PM2
+        });
+    });
+}
+
 startServer();
-
-
