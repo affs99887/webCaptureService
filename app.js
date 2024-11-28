@@ -75,13 +75,12 @@ async function setupCluster() {
     setInterval(async () => {
       if (isRecycling) return;
 
-      const runningTime = Date.now() - clusterStartTime;
-      if (runningTime > 6 * 60 * 60 * 1000 || requestCount > 1000) {
-        logger.info(
-          `Planning to recycle cluster - Running time: ${Math.floor(
-            runningTime / 3600000
-          )}h, Requests: ${requestCount}`
-        );
+      const now = new Date();
+      const hour = now.getHours();
+      const minutes = now.getMinutes();
+
+      if (hour === 4 && minutes < 5) {
+        logger.info("Planning to recycle cluster at 4 AM");
         await safeRecycleCluster();
       }
     }, 5 * 60 * 1000);
@@ -963,7 +962,7 @@ function restartService() {
   });
 }
 
-// ��义刷新日志的函数
+// 义刷新日志的函数
 function flushLogs() {
   if (logCache.length === 0) return;
 
