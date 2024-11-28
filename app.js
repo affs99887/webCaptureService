@@ -39,6 +39,9 @@ app.use(
 app.use(express.json());
 
 let cluster;
+let requestCount = 0;
+let clusterStartTime = null;
+let isRecycling = false;
 
 async function setupCluster() {
   if (!cluster) {
@@ -65,11 +68,117 @@ async function setupCluster() {
       const requestId = data.requestId || "unknown";
       logger.error(`[${requestId}] Error processing task: ${err.message}`);
     });
+
+    clusterStartTime = Date.now();
+    requestCount = 0;
+
+    setInterval(async () => {
+      if (isRecycling) return;
+
+      const runningTime = Date.now() - clusterStartTime;
+      if (runningTime > 6 * 60 * 60 * 1000 || requestCount > 1000) {
+        logger.info(
+          `Planning to recycle cluster - Running time: ${Math.floor(
+            runningTime / 3600000
+          )}h, Requests: ${requestCount}`
+        );
+        await safeRecycleCluster();
+      }
+    }, 5 * 60 * 1000);
   }
   return cluster;
 }
 
-// 配置日志功能
+async function safeRecycleCluster() {
+  if (isRecycling) {
+    logger.info("Recycling already in progress, skipping...");
+    return;
+  }
+
+  try {
+    isRecycling = true;
+    logger.info("Starting cluster recycling process");
+
+    const newCluster = await Cluster.launch({
+      concurrency: Cluster.CONCURRENCY_CONTEXT,
+      maxConcurrency: 10,
+      puppeteerOptions: {
+        executablePath: chromiumExecutablePath,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu",
+        ],
+        timeout: 60000,
+        protocolTimeout: 60000,
+      },
+      timeout: 120000,
+      retryLimit: 3,
+      retryDelay: 5000,
+    });
+
+    newCluster.on("taskerror", (err, data) => {
+      const requestId = data.requestId || "unknown";
+      logger.error(`[${requestId}] Error processing task: ${err.message}`);
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+
+    const oldCluster = cluster;
+
+    cluster = newCluster;
+    clusterStartTime = Date.now();
+    requestCount = 0;
+
+    await new Promise((resolve) => setTimeout(resolve, 10000));
+
+    try {
+      await oldCluster.close();
+      logger.info("Old cluster closed successfully");
+    } catch (error) {
+      logger.error("Error closing old cluster:", error);
+    }
+
+    logger.info("Cluster recycled successfully");
+  } catch (error) {
+    logger.error("Error during cluster recycling:", error);
+    if (!cluster) {
+      logger.error(
+        "Critical error: No available cluster. Attempting recovery..."
+      );
+      try {
+        cluster = await Cluster.launch({
+          concurrency: Cluster.CONCURRENCY_CONTEXT,
+          maxConcurrency: 10,
+          puppeteerOptions: {
+            executablePath: chromiumExecutablePath,
+            args: [
+              "--no-sandbox",
+              "--disable-setuid-sandbox",
+              "--disable-dev-shm-usage",
+              "--disable-gpu",
+            ],
+            timeout: 60000,
+            protocolTimeout: 60000,
+          },
+          timeout: 120000,
+          retryLimit: 3,
+          retryDelay: 5000,
+        });
+        cluster.on("taskerror", (err, data) => {
+          const requestId = data.requestId || "unknown";
+          logger.error(`[${requestId}] Error processing task: ${err.message}`);
+        });
+        logger.info("Recovery successful: New cluster created");
+      } catch (recoveryError) {
+        logger.error("Recovery failed:", recoveryError);
+      }
+    }
+  } finally {
+    isRecycling = false;
+  }
+}
 
 function getBeijingTime() {
   const now = new Date();
@@ -262,6 +371,19 @@ function generateRequestId() {
 // 修改处理函数，添加请求ID
 async function handleScreenshot(req, res) {
   const requestId = generateRequestId();
+
+  if (!cluster) {
+    logger.error(`[${requestId}] No available cluster`);
+    return res.status(500).json({
+      code: 500,
+      message: "Service temporarily unavailable",
+      success: false,
+      timestamp: Date.now(),
+      requestId,
+    });
+  }
+
+  requestCount++;
   const { url, filename, deviceName = "iPad Pro", width } = req.body;
 
   if (!url) {
@@ -435,6 +557,19 @@ async function getPageHeight(page) {
 // 同样修改 handlePdf 函数
 async function handlePdf(req, res) {
   const requestId = generateRequestId();
+
+  if (!cluster) {
+    logger.error(`[${requestId}] No available cluster`);
+    return res.status(500).json({
+      code: 500,
+      message: "Service temporarily unavailable",
+      success: false,
+      timestamp: Date.now(),
+      requestId,
+    });
+  }
+
+  requestCount++;
   const { url, filename, showPageNo = true } = req.body;
 
   if (!url) {
@@ -561,6 +696,19 @@ async function handlePdf(req, res) {
 // 同样修改 handleStream 函数
 async function handleStream(req, res) {
   const requestId = generateRequestId();
+
+  if (!cluster) {
+    logger.error(`[${requestId}] No available cluster`);
+    return res.status(500).json({
+      code: 500,
+      message: "Service temporarily unavailable",
+      success: false,
+      timestamp: Date.now(),
+      requestId,
+    });
+  }
+
+  requestCount++;
   const { url, filename, showPageNo = true } = req.body;
 
   if (!url) {
@@ -815,7 +963,7 @@ function restartService() {
   });
 }
 
-// 定义刷新日志的函数
+// ��义刷新日志的函数
 function flushLogs() {
   if (logCache.length === 0) return;
 
