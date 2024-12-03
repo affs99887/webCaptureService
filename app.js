@@ -256,12 +256,19 @@ process.on("SIGINT", async () => {
 
 // 捕获 SIGTERM 信号（通常是系统请求终止程序）
 process.on("SIGTERM", async () => {
-    logger.info("Received SIGTERM signal");
-    if (cluster) {
-        await cluster.close();
+    logger.info('接收到 SIGTERM 信号');
+    try {
+        if (cluster) {
+            await cluster.close();
+            logger.info('集群已成功关闭');
+        }
+        await logShutdown("SIGTERM");
+        process.exit(0);
+    } catch (err) {
+        logger.error('关闭过程中出错:', err);
+        await logShutdown("SIGTERM");
+        process.exit(1);
     }
-    await logShutdown("SIGTERM");
-    process.exit(0);
 });
 
 // 记录程序关闭的函数
