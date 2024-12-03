@@ -940,10 +940,10 @@ const startServer = async () => {
     })}`
   );
 
-  // 修改日志刷新间隔为每天凌晨四点
+  // 修改日志刷新间隔为每天凌晨三点
   logFlushInterval = setInterval(() => {
     const now = getBeijingTime();
-    if (now.getHours() === 4 && now.getMinutes() === 0) {
+    if (now.getHours() === 3 && now.getMinutes() === 0) {
       flushLogs();
     }
   }, 60 * 1000); // 每分钟检查一次
