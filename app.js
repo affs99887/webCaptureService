@@ -1046,10 +1046,7 @@ function flushLogs() {
     .join("\n");
 
   if (errorLogs) {
-    fs.appendFileSync(
-      path.join(logsDir, `error-${dateStr}.log`),
-      errorLogs + "\n"
-    );
+    fs.appendFileSync(path.join(logsDir, "error.log"), errorLogs + "\n");
   }
 
   // 清空缓存
