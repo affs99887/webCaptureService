@@ -741,8 +741,13 @@ const startServer = async () => {
     })}`
   );
 
-  // 启动定时刷新日志
-  logFlushInterval = setInterval(flushLogs, 60 * 60 * 1000); // 每小时刷新一次
+  // 修改日志刷新间隔为每天晚上11点55分
+  logFlushInterval = setInterval(() => {
+    const now = getBeijingTime();
+    if (now.getHours() === 23 && now.getMinutes() === 55) {
+      flushLogs();
+    }
+  }, 60 * 1000); // 每分钟检查一次
 
   const preferredPort = process.env.PORT || 3065;
   try {
@@ -815,11 +820,12 @@ function restartService() {
   });
 }
 
-// 定义刷新日志的函数
+// 更新 flushLogs 函数以使用更规范的日期格式
 function flushLogs() {
   if (logCache.length === 0) return;
 
   const now = getBeijingTime();
+  const dateStr = now.toISOString().split("T")[0].replace(/-/g, "-"); // 格式：YYYY-MM-DD
   const timestamp = now.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
 
   const logsToWrite =
@@ -827,10 +833,10 @@ function flushLogs() {
       .map((entry) => `${entry.timestamp} ${entry.level}: ${entry.message}`)
       .join("\n") + "\n";
 
-  // 写入日志文件
-  fs.appendFileSync(path.join(logsDir, "app-status.log"), logsToWrite);
+  // 写入日志文件，使用规范的日期格式
+  fs.appendFileSync(path.join(logsDir, `logger-${dateStr}.log`), logsToWrite);
 
-  // 如果有错误日志，单独写入error.log
+  // 如果有错误日志，使用相同的日期格式
   const errorLogs = logCache
     .filter((entry) => entry.level === "error")
     .map((entry) => `${entry.timestamp} ${entry.level}: ${entry.message}`)
