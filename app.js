@@ -393,7 +393,7 @@ async function handleScreenshot(req, res) {
   if (width && isNaN(parseInt(width))) {
     return res.status(400).json({
       code: 400,
-      message: "Width ��须是一个有效的数字",
+      message: "Width 必须是一个有效的数字",
       fileName: null,
       success: false,
       timestamp: Date.now(),
@@ -817,45 +817,6 @@ app.post("/pdf/stream", (req, res) => {
   //     res: res
   // });
   handleStream(req, res);
-});
-
-// 测试并发请求和PM2重启的端点
-app.get('/test-concurrent', async (req, res) => {
-  const requestId = generateRequestId();
-  incrementRequestCount();
-
-  logger.info(`[${requestId}] 开始处理请求`);
-
-  try {
-    // 模拟一个需要处理5秒的请求
-    const processingTime = 5000;
-
-    // 在处理过程中，如果活跃请求数达到3个，触发一个错误
-    if (activeRequests >= 15) {
-      throw new Error('模拟服务崩溃');
-    }
-
-    // 等待处理时间
-    await new Promise(resolve => setTimeout(resolve, processingTime));
-
-    logger.info(`[${requestId}] 请求处理完成`);
-    res.json({
-      success: true,
-      message: '请求处理成功',
-      requestId,
-      activeRequests
-    });
-  } catch (error) {
-    logger.error(`[${requestId}] 请求处理出错: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      requestId,
-      activeRequests
-    });
-  } finally {
-    decrementRequestCount();
-  }
 });
 
 function findAvailablePort(startPort) {
