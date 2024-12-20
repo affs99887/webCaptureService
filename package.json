@@ -13,7 +13,8 @@
   },
   "pkg": {
     "targets": [
-      "node18-win-x64"
+      "node18-win-x64",
+      "node18-linux-x64"
     ],
     "outputPath": "dist",
     "options": {
@@ -32,6 +33,7 @@
     "puppeteer": "^23.1.0",
     "puppeteer-cluster": "^0.24.0",
     "puppeteer-core": "^23.1.1",
-    "winston": "^3.14.2"
+    "winston": "^3.14.2",
+    "winston-daily-rotate-file": "^5.0.0"
   }
 }

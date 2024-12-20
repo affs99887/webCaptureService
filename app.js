@@ -10,12 +10,44 @@ const { Cluster } = require("puppeteer-cluster");
 const cors = require("cors");
 const { Readable } = require("stream");
 const pm2 = require("pm2");
+const os = require("os");
 
-const chromiumExecutablePath = path.join(
-  process.cwd(),
-  "chrome-win64",
-  "chrome.exe"
-);
+// 首先定义 logCache
+const logCache = [];
+
+// 然后创建 logger
+const logger = winston.createLogger({
+  level: "info",
+  format: winston.format.combine(
+    winston.format.timestamp({
+      format: () =>
+        getBeijingTime().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }),
+    }),
+    winston.format.printf(({ level, message, timestamp }) => {
+      // 将日志存入缓存
+      logCache.push({ level, message, timestamp });
+      // 如果是错误日志，输出到控制台
+      if (level === "error") {
+        console.error(`${timestamp} ${level}: ${message}`);
+      }
+      return `${timestamp} ${level}: ${message}`;
+    })
+  ),
+  transports: [
+    new winston.transports.Console({
+      silent: true,
+    }),
+  ],
+});
+
+// 根据操作系统选择 Chrome 路径
+const isWindows = ["win32", "win64"].includes(os.platform());
+const chromiumExecutablePath = isWindows
+  ? path.join(process.cwd(), "chrome-win64", "chrome.exe")
+  : "/usr/bin/google-chrome";
+
+logger.info(`Operating System: ${os.platform()}`);
+logger.info(`Using Chrome path: ${chromiumExecutablePath}`);
 
 const app = express();
 
@@ -55,6 +87,7 @@ async function setupCluster() {
         ],
         timeout: 60000,
         protocolTimeout: 60000,
+        headless: "new",
       },
       timeout: 120000,
       retryLimit: 3,
@@ -87,48 +120,74 @@ if (!fs.existsSync(logsDir)) {
   fs.mkdirSync(logsDir, { recursive: true });
 }
 
-const logCache = [];
 let logFlushInterval;
 
-const logger = winston.createLogger({
-  level: "info",
-  format: winston.format.combine(
-    winston.format.timestamp({
-      format: () =>
-        getBeijingTime().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }),
-    }),
-    winston.format.printf(({ level, message, timestamp }) => {
-      // 将日志存入缓存
-      logCache.push({ level, message, timestamp });
-      // 如果是错误日志，输出到控制台
-      if (level === "error") {
-        console.error(`${timestamp} ${level}: ${message}`);
-      }
-      return `${timestamp} ${level}: ${message}`;
-    })
-  ),
-  transports: [
-    // 添加一个静默的Console transport来避免警告
-    new winston.transports.Console({
-      silent: true,
-    }),
-  ],
-});
+// 添加一个请求计数器
+let activeRequests = 0;
+let isShuttingDown = false;
 
-// 捕获未处理的异常
+// 在每个请求处理开始时增加计数
+function incrementRequestCount() {
+  activeRequests++;
+}
+
+// 在每个请求处理结束时减少计数
+function decrementRequestCount() {
+  activeRequests--;
+}
+
+// 修改致命错误处理
 process.on("uncaughtException", async (error) => {
-  logger.error("Uncaught Exception:", error);
-  await logShutdown("Uncaught Exception");
-  // 使用 pm2 重启服务
-  restartService();
+  try {
+    isShuttingDown = true;
+    logger.error("Uncaught Exception:", error);
+
+    // 等待所有活跃请求完成
+    if (activeRequests > 0) {
+      logger.info(`等待 ${activeRequests} 个活跃请求完成...`);
+      await new Promise((resolve) => {
+        const checkInterval = setInterval(() => {
+          if (activeRequests === 0) {
+            clearInterval(checkInterval);
+            resolve();
+          }
+        }, 1000);
+      });
+    }
+
+    await logShutdown("Uncaught Exception");
+    await new Promise((resolve) => {
+      flushLogs();
+      setTimeout(resolve, 2000);
+    });
+
+    logger.info("准备重启服务...");
+    await restartService();
+  } catch (err) {
+    console.error("处理未捕获异常时出错:", err);
+    process.exit(1);
+  }
 });
 
 // 捕获未处理的 Promise 拒绝
 process.on("unhandledRejection", async (reason, promise) => {
-  logger.error("Unhandled Rejection at:", promise, "reason:", reason);
-  await logShutdown("Unhandled Promise Rejection");
-  // 使用 pm2 重启服务
-  restartService();
+  try {
+    logger.error("Unhandled Rejection at:", promise, "reason:", reason);
+    await logShutdown("Unhandled Promise Rejection");
+
+    // 确保日志写入完成后再重启
+    await new Promise((resolve) => {
+      flushLogs();
+      setTimeout(resolve, 2000); // 给予2秒确保日志写入
+    });
+
+    logger.info("准备重启服务...");
+    // 使用 pm2 重启服务
+    await restartService();
+  } catch (err) {
+    console.error("处理未处理的Promise拒绝时出错:", err);
+    process.exit(1);
+  }
 });
 
 // 捕获 SIGINT 信号（通常是通过 Ctrl+C 终止程序）
@@ -210,18 +269,6 @@ const mobileDevices = {
       isLandscape: false,
     },
   },
-  "Pixel 2": {
-    userAgent:
-      "Mozilla/5.0 (Linux; Android 8.0; Pixel 2 Build/OPD3.170816.012) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3765.0 Mobile Safari/537.36",
-    viewport: {
-      width: 411,
-      height: 731,
-      deviceScaleFactor: 2.625,
-      isMobile: true,
-      hasTouch: true,
-      isLandscape: false,
-    },
-  },
   "iPad Pro": {
     userAgent:
       "Mozilla/5.0 (iPad; CPU OS 11_0 like Mac OS X) AppleWebKit/604.1.34 (KHTML, like Gecko) Version/11.0 Mobile/15A5341f Safari/604.1",
@@ -236,7 +283,15 @@ const mobileDevices = {
   },
 };
 
-// 处理文件名和路径的辅助函数
+function normalizeDeviceName(name) {
+  if (!name) return "";
+  // 将所有空白字符（包括不间断空格）替换为标准空格
+  return name.replace(/\s+/g, " ").trim();
+}
+
+const allowedDevices = ["iPhone X", "iPad Pro"];
+
+// 处理文件名和路径辅助函数
 function processFilename(filename, extension, dirName) {
   // 移除任何现有的文件扩展名
   let baseName = path.basename(filename, path.extname(filename));
@@ -261,14 +316,64 @@ function generateRequestId() {
 
 // 修改处理函数，添加请求ID
 async function handleScreenshot(req, res) {
-  const requestId = generateRequestId();
-  const { url, filename, deviceName = "iPad Pro", width } = req.body;
+  // 如果服务正在关闭，拒绝新的请求
+  if (isShuttingDown) {
+    return res.status(503).json({
+      code: 503,
+      message: "服务正在重启中，请稍后重试",
+      success: false,
+      timestamp: Date.now(),
+    });
+  }
 
-  if (!url) {
-    logger.info(`[${requestId}] Screenshot request rejected: URL is required`);
+  const requestId = generateRequestId();
+  incrementRequestCount();
+
+  const {
+    url,
+    filename,
+    deviceName: rawDeviceName = "iPad Pro",
+    width,
+  } = req.body;
+
+  // 规范化设备名称
+  const deviceName = normalizeDeviceName(rawDeviceName);
+
+  // 检查设备名称是否在允许列表中
+  if (!allowedDevices.includes(deviceName)) {
+    const errorMessage = `设备 "${deviceName}" 未被允许。允许的设备有: ${allowedDevices.join(
+      ", "
+    )}`;
+    logger.error(`[${requestId}] ${errorMessage}`);
     return res.status(400).json({
       code: 400,
-      message: "URL is required",
+      message: errorMessage,
+      fileName: null,
+      success: false,
+      timestamp: Date.now(),
+      requestId,
+    });
+  }
+
+  // 检查设备配置是否存在
+  if (!mobileDevices[deviceName]) {
+    const errorMessage = `设备配置 "${deviceName}" 未找到`;
+    logger.error(`[${requestId}] ${errorMessage}`);
+    return res.status(400).json({
+      code: 400,
+      message: errorMessage,
+      fileName: null,
+      success: false,
+      timestamp: Date.now(),
+      requestId,
+    });
+  }
+
+  if (!url) {
+    logger.info(`[${requestId}] 截图请求被拒绝：需要提供 URL`);
+    return res.status(400).json({
+      code: 400,
+      message: "URL 是必需的",
       fileName: null,
       success: false,
       timestamp: Date.now(),
@@ -278,7 +383,7 @@ async function handleScreenshot(req, res) {
   if (!filename) {
     return res.status(400).json({
       code: 400,
-      message: "Filename is required",
+      message: "Filename 是必需的",
       fileName: null,
       success: false,
       timestamp: Date.now(),
@@ -288,7 +393,7 @@ async function handleScreenshot(req, res) {
   if (width && isNaN(parseInt(width))) {
     return res.status(400).json({
       code: 400,
-      message: "Width must be a valid number",
+      message: "Width ��须是一个有效的数字",
       fileName: null,
       success: false,
       timestamp: Date.now(),
@@ -359,6 +464,8 @@ async function handleScreenshot(req, res) {
       timestamp: Date.now(),
       requestId,
     });
+  } finally {
+    decrementRequestCount();
   }
 }
 
@@ -712,6 +819,45 @@ app.post("/pdf/stream", (req, res) => {
   handleStream(req, res);
 });
 
+// 测试并发请求和PM2重启的端点
+app.get('/test-concurrent', async (req, res) => {
+  const requestId = generateRequestId();
+  incrementRequestCount();
+
+  logger.info(`[${requestId}] 开始处理请求`);
+
+  try {
+    // 模拟一个需要处理5秒的请求
+    const processingTime = 5000;
+
+    // 在处理过程中，如果活跃请求数达到3个，触发一个错误
+    if (activeRequests >= 15) {
+      throw new Error('模拟服务崩溃');
+    }
+
+    // 等待处理时间
+    await new Promise(resolve => setTimeout(resolve, processingTime));
+
+    logger.info(`[${requestId}] 请求处理完成`);
+    res.json({
+      success: true,
+      message: '请求处理成功',
+      requestId,
+      activeRequests
+    });
+  } catch (error) {
+    logger.error(`[${requestId}] 请求处理出错: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      requestId,
+      activeRequests
+    });
+  } finally {
+    decrementRequestCount();
+  }
+});
+
 function findAvailablePort(startPort) {
   return new Promise((resolve, reject) => {
     const server = http.createServer();
@@ -801,21 +947,26 @@ const startServer = async () => {
   }
 };
 
-// 使用 pm2 重启服务的函数
+// 修改 restartService 函数使其返回 Promise
 function restartService() {
-  pm2.connect(function (err) {
-    if (err) {
-      console.error(err);
-      process.exit(2);
-    }
-
-    pm2.restart(process.env.pm_id, function (err, apps) {
+  return new Promise((resolve, reject) => {
+    pm2.connect(function (err) {
       if (err) {
-        console.error(err);
-      } else {
-        console.log("Service restarted successfully.");
+        logger.error("PM2 连接失败:", err);
+        reject(err);
+        return;
       }
-      pm2.disconnect(); // Disconnects from PM2
+
+      pm2.restart(process.env.pm_id, function (err, apps) {
+        if (err) {
+          logger.error("PM2 重启失败:", err);
+          reject(err);
+        } else {
+          logger.info("服务重启成功");
+          resolve(apps);
+        }
+        pm2.disconnect(); // 断开与 PM2 的连接
+      });
     });
   });
 }
