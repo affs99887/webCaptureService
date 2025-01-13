@@ -84,14 +84,17 @@ async function setupCluster() {
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
           "--disable-gpu",
+          "--disable-web-security",
+          "--disable-features=IsolateOrigins,site-per-process",
         ],
-        timeout: 60000,
-        protocolTimeout: 60000,
+        timeout: 180000,
+        protocolTimeout: 180000,
         headless: "new",
       },
-      timeout: 120000,
+      timeout: 240000,
       retryLimit: 3,
       retryDelay: 5000,
+      monitor: true,
     });
 
     cluster.on("taskerror", (err, data) => {
@@ -425,9 +428,27 @@ async function handleScreenshot(req, res) {
         await page.setUserAgent(device.userAgent);
         await page.setViewport(viewport);
 
+        // 设置默认超时为 3 分钟
+        page.setDefaultTimeout(180000);
+        page.setDefaultNavigationTimeout(180000);
+
+        // 优化页面加载策略
+        await page.setRequestInterception(true);
+        page.on("request", (request) => {
+          if (
+            ["image", "stylesheet", "font"].includes(request.resourceType())
+          ) {
+            request.continue();
+          } else if (request.resourceType() === "script") {
+            request.continue();
+          } else {
+            request.continue();
+          }
+        });
+
         await page.goto(data.url, {
-          waitUntil: "networkidle0",
-          timeout: 60000,
+          waitUntil: ["load", "domcontentloaded", "networkidle0"],
+          timeout: 180000,
         });
 
         const screenshot = await captureFullPage(page, data.requestId);
@@ -718,7 +739,7 @@ async function handleStream(req, res) {
 
         await page.goto(data.url, {
           waitUntil: "networkidle0",
-          timeout: 60000,
+          timeout: 120000,
         });
 
         await captureFullPage(page, data.requestId);
