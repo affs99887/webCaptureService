@@ -319,7 +319,6 @@ function generateRequestId() {
 
 // 修改处理函数，添加请求ID
 async function handleScreenshot(req, res) {
-  // 如果服务正在关闭，拒绝新的请求
   if (isShuttingDown) {
     return res.status(503).json({
       code: 503,
@@ -339,10 +338,8 @@ async function handleScreenshot(req, res) {
     width,
   } = req.body;
 
-  // 规范化设备名称
   const deviceName = normalizeDeviceName(rawDeviceName);
 
-  // 检查设备名称是否在允许列表中
   if (!allowedDevices.includes(deviceName)) {
     const errorMessage = `设备 "${deviceName}" 未被允许。允许的设备有: ${allowedDevices.join(
       ", "
@@ -358,7 +355,6 @@ async function handleScreenshot(req, res) {
     });
   }
 
-  // 检查设备配置是否存在
   if (!mobileDevices[deviceName]) {
     const errorMessage = `设备配置 "${deviceName}" 未找到`;
     logger.error(`[${requestId}] ${errorMessage}`);
@@ -428,11 +424,9 @@ async function handleScreenshot(req, res) {
         await page.setUserAgent(device.userAgent);
         await page.setViewport(viewport);
 
-        // 设置默认超时为 3 分钟
         page.setDefaultTimeout(180000);
         page.setDefaultNavigationTimeout(180000);
 
-        // 优化页面加载策略
         await page.setRequestInterception(true);
         page.on("request", (request) => {
           if (
@@ -450,6 +444,38 @@ async function handleScreenshot(req, res) {
           waitUntil: ["load", "domcontentloaded", "networkidle0"],
           timeout: 180000,
         });
+
+        // 注入水印样式
+        await page.evaluate((waterMarkData) => {
+          const style = document.createElement("style");
+          style.textContent = `
+            @page:first { margin-top: 0; margin-bottom: 0; }
+            @page { margin-top: 5mm; margin-bottom: 10mm; }
+            body, html { background-color: white !important; position: relative; }
+            
+            /* 创建水印容器 */
+            body::before {
+              content: '';
+              position: fixed;
+              top: 0;
+              left: 0;
+              width: 100%;
+              height: 100%;
+              z-index: 9999;
+              
+              /* 水印图片设置 */
+              background-image: url('${waterMarkData}');
+              background-repeat: repeat;
+              background-size: 500px auto;
+              pointer-events: none;
+              
+              /* 确保水印在打印时可见 */
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+            }
+          `;
+          document.head.appendChild(style);
+        }, waterMark);
 
         const screenshot = await captureFullPage(page, data.requestId);
         return screenshot;
@@ -560,6 +586,12 @@ async function getPageHeight(page) {
   return page.evaluate(() => document.documentElement.scrollHeight);
 }
 
+const waterMark =
+  "data:image/png;base64," +
+  fs
+    .readFileSync(path.join(process.cwd(), "src", "assets", "watermark.png"))
+    .toString("base64");
+
 // 同样修改 handlePdf 函数
 async function handlePdf(req, res) {
   const requestId = generateRequestId();
@@ -587,19 +619,10 @@ async function handlePdf(req, res) {
     });
   }
 
-  if (typeof showPageNo !== "boolean") {
-    return res.status(400).json({
-      code: 400,
-      message: "showPageNo must be a boolean value",
-      fileName: null,
-      success: false,
-      timestamp: Date.now(),
-      requestId,
-    });
-  }
-
   try {
-    logger.info(`[${requestId}] Starting PDF generation for ${url}`);
+    logger.info(
+      `[${requestId}] Starting PDF generation with watermark for ${url}`
+    );
     const cluster = await setupCluster();
 
     const result = await cluster.execute(
@@ -618,20 +641,42 @@ async function handlePdf(req, res) {
 
         await captureFullPage(page, data.requestId);
 
+        // 注入水印样式
+        await page.evaluate((waterMarkData) => {
+          const style = document.createElement("style");
+          style.textContent = `
+            @page:first { margin-top: 0; margin-bottom: 0; }
+            @page { margin-top: 5mm; margin-bottom: 10mm; }
+            body, html { background-color: white !important; position: relative; }
+            
+            /* 创建水印容器 */
+            body::before {
+              content: '';
+              position: fixed;
+              top: 0;
+              left: 0;
+              width: 100%;
+              height: 100%;
+              z-index: 9999;
+              
+              /* 水印图片设置 */
+              background-image: url('${waterMarkData}');
+              background-repeat: repeat;
+              background-size: 400px auto;
+              pointer-events: none;
+              
+              /* 确保水印在打印时可见 */
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+            }
+          `;
+          document.head.appendChild(style);
+        }, waterMark);
+
         const a4Width = 794;
         const a4Height = 1123;
         let scale = Math.min(a4Width / device.viewport.width, 2);
         scale = Math.max(scale, 0.1);
-
-        await page.evaluate(() => {
-          const style = document.createElement("style");
-          style.textContent = `
-                    @page:first { margin-top: 0; margin-bottom: 0; }
-                    @page { margin-top: 5mm; margin-bottom: 10mm; }
-                    body, html { background-color: white !important; }
-                `;
-          document.head.appendChild(style);
-        });
 
         const pdfOptions = {
           format: "A4",
@@ -641,12 +686,12 @@ async function handlePdf(req, res) {
           headerTemplate: "<span></span>",
           footerTemplate: data.showPageNo
             ? `
-                    <div style="width: 100%; font-size: 10px; text-align: center; color: #808080; position: relative;">
-                        <span style="position: absolute; left: 0; right: 0; top: -5px;">
-                            <span class="pageNumber"></span>/<span class="totalPages"></span>
-                        </span>
-                    </div>
-                `
+              <div style="width: 100%; font-size: 10px; text-align: center; color: #808080; position: relative;">
+                <span style="position: absolute; left: 0; right: 0; top: -5px;">
+                  <span class="pageNumber"></span>/<span class="totalPages"></span>
+                </span>
+              </div>
+            `
             : "<span></span>",
         };
 
@@ -658,11 +703,13 @@ async function handlePdf(req, res) {
     const filePath = processFilename(filename, "pdf", "pdfs");
     fs.writeFileSync(filePath, result);
 
-    logger.info(`[${requestId}] PDF saved successfully to ${filePath}`);
+    logger.info(
+      `[${requestId}] PDF with watermark saved successfully to ${filePath}`
+    );
 
     res.status(200).json({
       code: 200,
-      message: "PDF generated and saved successfully",
+      message: "PDF with watermark generated and saved successfully",
       fileName: path.basename(filePath),
       success: true,
       timestamp: Date.now(),
@@ -713,19 +760,10 @@ async function handleStream(req, res) {
     });
   }
 
-  if (typeof showPageNo !== "boolean") {
-    return res.status(400).json({
-      code: 400,
-      message: "showPageNo must be a boolean value",
-      fileName: null,
-      success: false,
-      timestamp: Date.now(),
-      requestId,
-    });
-  }
-
   try {
-    logger.info(`[${requestId}] Starting PDF stream generation for ${url}`);
+    logger.info(
+      `[${requestId}] Starting PDF stream generation with watermark for ${url}`
+    );
     const cluster = await setupCluster();
 
     const pdfBuffer = await cluster.execute(
@@ -744,20 +782,42 @@ async function handleStream(req, res) {
 
         await captureFullPage(page, data.requestId);
 
+        // 注入水印样式
+        await page.evaluate((waterMarkData) => {
+          const style = document.createElement("style");
+          style.textContent = `
+            @page:first { margin-top: 0; margin-bottom: 0; }
+            @page { margin-top: 5mm; margin-bottom: 10mm; }
+            body, html { background-color: white !important; position: relative; }
+            
+            /* 创建水印容器 */
+            body::before {
+              content: '';
+              position: fixed;
+              top: 0;
+              left: 0;
+              width: 100%;
+              height: 100%;
+              z-index: 9999;
+              
+              /* 水印图片设置 */
+              background-image: url('${waterMarkData}');
+              background-repeat: repeat;
+              background-size: 500px auto;
+              pointer-events: none;
+              
+              /* 确保水印在打印时可见 */
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+            }
+          `;
+          document.head.appendChild(style);
+        }, waterMark);
+
         const a4Width = 794;
         const a4Height = 1123;
         let scale = Math.min(a4Width / device.viewport.width, 2);
         scale = Math.max(scale, 0.1);
-
-        await page.evaluate(() => {
-          const style = document.createElement("style");
-          style.textContent = `
-                    @page:first { margin-top: 0; margin-bottom: 0; }
-                    @page { margin-top: 5mm; margin-bottom: 10mm; }
-                    body, html { background-color: white !important; }
-                `;
-          document.head.appendChild(style);
-        });
 
         const pdfOptions = {
           format: "A4",
@@ -767,12 +827,12 @@ async function handleStream(req, res) {
           headerTemplate: "<span></span>",
           footerTemplate: data.showPageNo
             ? `
-                    <div style="width: 100%; font-size: 10px; text-align: center; color: #808080; position: relative;">
-                        <span style="position: absolute; left: 0; right: 0; top: -5px;">
-                            <span class="pageNumber"></span>/<span class="totalPages"></span>
-                        </span>
-                    </div>
-                `
+              <div style="width: 100%; font-size: 10px; text-align: center; color: #808080; position: relative;">
+                <span style="position: absolute; left: 0; right: 0; top: -5px;">
+                  <span class="pageNumber"></span>/<span class="totalPages"></span>
+                </span>
+              </div>
+            `
             : "<span></span>",
         };
 
@@ -794,7 +854,9 @@ async function handleStream(req, res) {
     // 将流通过管道发送给客户端
     stream.pipe(res);
 
-    logger.info(`[${requestId}] PDF stream sent successfully for ${url}`);
+    logger.info(
+      `[${requestId}] PDF stream with watermark sent successfully for ${url}`
+    );
   } catch (err) {
     console.error(`[${requestId}] Error details:`, err);
     logger.error(`[${requestId}] Error details:`, err);
