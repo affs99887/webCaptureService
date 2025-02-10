@@ -516,7 +516,7 @@ async function handleScreenshot(req, res) {
   }
 }
 
-async function captureFullPage(page, requestId) {
+async function captureFullPage(page, requestId, waitForGetDataPromise) {
   // 滚动到底部以触发懒加载内容
   await autoScroll(page);
 
@@ -530,13 +530,41 @@ async function captureFullPage(page, requestId) {
   });
 
   // 设置足够大的视口高度
+  logger.info(
+    `[${requestId}] Viewport set to ${page.viewport().width}x${maxHeight}`
+  );
   await page.setViewport({
     width: page.viewport().width,
     height: maxHeight,
   });
 
   // 再次滚动到底部确保所有内容都已加载
+  logger.info(`[${requestId}] Starting final autoScroll`);
   await autoScroll(page);
+  logger.info(`[${requestId}] After final autoScroll - URL: ${page.url()}`);
+
+  // 在最后一次autoScroll后检查getData请求状态
+  logger.info(`[${requestId}] Checking getData request status...`);
+  try {
+    // 等待一小段时间，确保所有可能的getData请求都已经发起
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    // 等待最后一次getData请求完成
+    if (waitForGetDataPromise) {
+      logger.info(
+        `[${requestId}] Waiting for last getData request to complete...`
+      );
+      await waitForGetDataPromise;
+      // 再等待一小段时间，确保数据已经渲染到页面上
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      logger.info(
+        `[${requestId}] Last getData request completed successfully, proceeding with screenshot`
+      );
+    }
+  } catch (error) {
+    logger.error(`[${requestId}] Error waiting for getData: ${error.message}`);
+    throw error;
+  }
 
   // 捕获整个页面的截图
   logger.info(`[${requestId}] Capturing screenshot with height: ${maxHeight}`);
@@ -544,6 +572,9 @@ async function captureFullPage(page, requestId) {
     width: `${page.viewport().width}px`,
     encoding: "base64",
   });
+  logger.info(
+    `[${requestId}] Screenshot captured successfully - URL: ${page.url()}`
+  );
 
   return `data:image/png;base64,${screenshot}`;
 }
@@ -634,12 +665,109 @@ async function handlePdf(req, res) {
         await page.setUserAgent(device.userAgent);
         await page.setViewport(device.viewport);
 
+        // 启用请求拦截
+        await page.setRequestInterception(true);
+
+        // 创建一个Promise来等待getData请求完成
+        const waitForGetData = new Promise((resolve, reject) => {
+          let getDataRequest = null;
+          let isGetDataFound = false;
+          let requestCount = 0;
+          let lastRequest = null;
+          let pendingRequest = null;
+          let resolvePromise = resolve; // 保存resolve函数的引用
+
+          // 监听所有请求
+          page.on("request", (request) => {
+            if (request.url().includes("/reportView/getData")) {
+              requestCount++;
+              isGetDataFound = true;
+              lastRequest = request;
+              pendingRequest = request;
+              getDataRequest = request;
+              logger.info(
+                `[${
+                  data.requestId
+                }] getData request #${requestCount} detected: ${request.url()}`
+              );
+            }
+            request.continue();
+          });
+
+          // 监听请求完成
+          page.on("requestfinished", (request) => {
+            if (request === pendingRequest) {
+              if (request === lastRequest) {
+                logger.info(
+                  `[${data.requestId}] Last getData request #${requestCount} finished successfully`
+                );
+                resolvePromise(); // 使用保存的resolve函数
+              } else {
+                logger.info(
+                  `[${data.requestId}] getData request #${requestCount} finished, but not the last one`
+                );
+              }
+              pendingRequest = null;
+            }
+          });
+
+          // 监听请求失败
+          page.on("requestfailed", (request) => {
+            if (request === pendingRequest) {
+              const error = request.failure();
+              logger.error(
+                `[${data.requestId}] getData request #${requestCount} failed: ${
+                  error?.errorText || "Unknown error"
+                }`
+              );
+              if (request === lastRequest) {
+                reject(
+                  new Error(
+                    `Last getData request failed: ${
+                      error?.errorText || "Unknown error"
+                    }`
+                  )
+                );
+              }
+              pendingRequest = null;
+            }
+          });
+
+          // 设置超时检查
+          setTimeout(() => {
+            if (!isGetDataFound) {
+              logger.error(
+                `[${data.requestId}] No getData request found within 30 seconds`
+              );
+              reject(new Error("getData request not found within 30 seconds"));
+            } else if (pendingRequest) {
+              logger.error(
+                `[${data.requestId}] Last getData request #${requestCount} did not complete within timeout`
+              );
+              reject(new Error("Last getData request timed out"));
+            }
+          }, 30000);
+        });
+
+        // 导航到页面
+        logger.info(`[${data.requestId}] Navigating to page: ${data.url}`);
         await page.goto(data.url, {
           waitUntil: "networkidle0",
           timeout: 60000,
         });
 
-        await captureFullPage(page, data.requestId);
+        // 确保页面内容已完全加载
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        // 记录捕获前的页面状态
+        logger.info(
+          `[${
+            data.requestId
+          }] Before capture - URL: ${page.url()}, Title: ${await page.title()}`
+        );
+
+        // 执行页面捕获，传入waitForGetData Promise
+        await captureFullPage(page, data.requestId, waitForGetData);
 
         // 注入水印样式
         await page.evaluate((waterMarkData) => {
@@ -703,9 +831,7 @@ async function handlePdf(req, res) {
     const filePath = processFilename(filename, "pdf", "pdfs");
     fs.writeFileSync(filePath, result);
 
-    logger.info(
-      `[${requestId}] PDF with watermark saved successfully to ${filePath}`
-    );
+    logger.info(`[${requestId}] PDF saved successfully to ${filePath}`);
 
     res.status(200).json({
       code: 200,
@@ -775,12 +901,122 @@ async function handleStream(req, res) {
         await page.setUserAgent(device.userAgent);
         await page.setViewport(device.viewport);
 
+        // 启用请求拦截
+        await page.setRequestInterception(true);
+
+        // 创建一个Promise来等待getData请求完成
+        const waitForGetData = new Promise((resolve, reject) => {
+          let getDataRequest = null;
+          let isGetDataFound = false;
+          let requestCount = 0;
+          let lastRequest = null;
+          let pendingRequest = null;
+          let resolvePromise = resolve; // 保存resolve函数的引用
+
+          // 监听所有请求
+          page.on("request", (request) => {
+            if (request.url().includes("/reportView/getData")) {
+              requestCount++;
+              isGetDataFound = true;
+              lastRequest = request;
+              pendingRequest = request;
+              getDataRequest = request;
+              logger.info(
+                `[${
+                  data.requestId
+                }] getData request #${requestCount} detected: ${request.url()}, headers: ${JSON.stringify(
+                  request.headers()
+                )}`
+              );
+            }
+            request.continue();
+          });
+
+          // 监听请求完成
+          page.on("requestfinished", (request) => {
+            if (request === pendingRequest) {
+              if (request === lastRequest) {
+                logger.info(
+                  `[${data.requestId}] Last getData request #${requestCount} finished successfully`
+                );
+                resolvePromise(); // 使用保存的resolve函数
+              } else {
+                logger.info(
+                  `[${data.requestId}] getData request #${requestCount} finished, but not the last one`
+                );
+              }
+              pendingRequest = null;
+            }
+          });
+
+          // 监听请求失败
+          page.on("requestfailed", (request) => {
+            if (request === pendingRequest) {
+              const error = request.failure();
+              logger.error(
+                `[${data.requestId}] getData request #${requestCount} failed: ${
+                  error?.errorText || "Unknown error"
+                }`
+              );
+              if (request === lastRequest) {
+                reject(
+                  new Error(
+                    `Last getData request failed: ${
+                      error?.errorText || "Unknown error"
+                    }`
+                  )
+                );
+              }
+              pendingRequest = null;
+            }
+          });
+
+          // 监听页面错误
+          page.on("error", (err) => {
+            logger.error(`[${data.requestId}] Page error: ${err.message}`);
+          });
+
+          // 监听页面console消息
+          page.on("console", (msg) => {
+            logger.info(
+              `[${data.requestId}] Console ${msg.type()}: ${msg.text()}`
+            );
+          });
+
+          // 设置超时检查
+          setTimeout(() => {
+            if (!isGetDataFound) {
+              logger.error(
+                `[${data.requestId}] No getData request found within 30 seconds`
+              );
+              reject(new Error("getData request not found within 30 seconds"));
+            } else if (pendingRequest) {
+              logger.error(
+                `[${data.requestId}] Last getData request #${requestCount} did not complete within timeout`
+              );
+              reject(new Error("Last getData request timed out"));
+            }
+          }, 30000);
+        });
+
+        // 导航到页面
+        logger.info(`[${data.requestId}] Navigating to page: ${data.url}`);
         await page.goto(data.url, {
           waitUntil: "networkidle0",
           timeout: 120000,
         });
 
-        await captureFullPage(page, data.requestId);
+        // 确保页面内容已完全加载
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        // 记录捕获前的页面状态
+        logger.info(
+          `[${
+            data.requestId
+          }] Before capture - URL: ${page.url()}, Title: ${await page.title()}`
+        );
+
+        await captureFullPage(page, data.requestId, waitForGetData);
 
         // 注入水印样式
         await page.evaluate((waterMarkData) => {
