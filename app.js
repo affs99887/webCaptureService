@@ -1313,7 +1313,7 @@ async function autoScroll(page) {
   await page.evaluate(async () => {
     await new Promise((resolve) => {
       let totalHeight = 0;
-      const distance = 300; // 增加滚动距离
+      const distance = 1000; // 增加滚动距离
       const timer = setInterval(() => {
         window.scrollBy(0, distance);
         totalHeight += distance;
@@ -1330,7 +1330,7 @@ async function autoScroll(page) {
 async function slowScrollToTop(page, callback) {
   await page.evaluate(async (cb) => {
     await new Promise((resolve) => {
-      const distance = -50; // 向上滚动
+      const distance = -1000; // 向上滚动
       const timer = setInterval(() => {
         window.scrollBy(0, distance);
         if (window.pageYOffset <= 0) {
@@ -1338,7 +1338,7 @@ async function slowScrollToTop(page, callback) {
           resolve();
         }
         cb(document.documentElement.scrollHeight);
-      }, 100);
+      }, 50);
     });
   }, callback);
 }
