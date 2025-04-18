@@ -338,12 +338,18 @@ const MEMORY_WARNING_THRESHOLD = parseInt(
 const CLUSTER_SWITCH_COOLDOWN = parseInt(
   process.env.CLUSTER_SWITCH_COOLDOWN || "300000"
 ); // 5分钟冷却时间
+// 备用集群创建冷却期（毫秒）- 集群切换后多久可以再次创建备用集群
+const STANDBY_CLUSTER_COOLDOWN = parseInt(
+  process.env.STANDBY_CLUSTER_COOLDOWN || "120000"
+); // 默认2分钟
 
 let memoryCheckInterval;
 let currentCluster = null;
 let standbyCluster = null;
 let isClusterSwitching = false;
 let lastClusterSwitchTime = 0;
+// 添加一个新的变量表示创建备用集群的冷却期
+let standbyClusterCooldownTime = 0;
 
 async function setupCluster() {
   // 如果当前集群已存在，直接返回
@@ -361,7 +367,7 @@ async function setupCluster() {
   // 创建新集群
   const newCluster = await Cluster.launch({
     concurrency: Cluster.CONCURRENCY_CONTEXT,
-    maxConcurrency: 10,
+    maxConcurrency: 20,
     puppeteerOptions: {
       executablePath: chromiumExecutablePath,
       args: [
@@ -401,7 +407,7 @@ async function prepareStandbyCluster() {
   try {
     standbyCluster = await Cluster.launch({
       concurrency: Cluster.CONCURRENCY_CONTEXT,
-      maxConcurrency: 10,
+      maxConcurrency: 20,
       puppeteerOptions: {
         executablePath: chromiumExecutablePath,
         args: [
@@ -473,11 +479,7 @@ async function switchToStandbyCluster() {
   if (!standbyCluster) {
     logger.error("无法切换到备用集群：多次尝试创建备用集群均失败");
     // 如果实在无法创建备用集群，记录状态并尝试释放一些资源
-    try {
-      global.gc(); // 尝试触发垃圾回收（如果启用了--expose-gc）
-    } catch (e) {
-      // 忽略错误，因为不是所有环境都启用了显式GC
-    }
+    tryGarbageCollection();
     return false;
   }
 
@@ -488,12 +490,10 @@ async function switchToStandbyCluster() {
     // 保存旧集群的引用，但继续使用它处理现有请求
     const oldCluster = currentCluster;
 
-    // 记录旧集群状态
+    // 记录旧集群状态 - 修复获取活跃任务数的问题
     if (oldCluster) {
-      const workerCount = oldCluster.workerCount
-        ? oldCluster.workerCount()
-        : "unknown";
-      logger.info(`旧集群状态：活跃任务数 ${workerCount}`);
+      // 使用活跃请求数作为指示器，而不是依赖workerCount方法
+      logger.info(`旧集群状态：活跃请求数 ${activeRequests}`);
     }
 
     // 将备用集群设置为当前集群
@@ -505,13 +505,10 @@ async function switchToStandbyCluster() {
     if (oldCluster) {
       setTimeout(async () => {
         try {
-          // 检查旧集群是否还有活跃任务
-          const hasWorkerCountMethod =
-            typeof oldCluster.workerCount === "function";
-
-          if (hasWorkerCountMethod && oldCluster.workerCount() > 0) {
-            const taskCount = oldCluster.workerCount();
-            logger.info(`旧集群仍有 ${taskCount} 个活跃任务，延迟关闭`);
+          // 检查是否还有活跃任务 - 使用activeRequests而不是workerCount
+          if (activeRequests > 0) {
+            const taskCount = activeRequests;
+            logger.info(`旧集群仍有 ${taskCount} 个活跃请求，延迟关闭`);
 
             // 定期检查直到没有活跃任务
             let checkCount = 0;
@@ -520,21 +517,19 @@ async function switchToStandbyCluster() {
             const checkInterval = setInterval(async () => {
               checkCount++;
 
-              // 捕获可能的错误(例如集群已关闭)
+              // 捕获可能的错误
               try {
-                const remainingTasks = oldCluster.workerCount();
-
-                if (remainingTasks === 0 || checkCount >= maxChecks) {
+                if (activeRequests === 0 || checkCount >= maxChecks) {
                   clearInterval(checkInterval);
                   const reason =
-                    remainingTasks === 0
+                    activeRequests === 0
                       ? "切换到新集群且无活跃任务"
-                      : `达到最大检查次数(${maxChecks})，仍有${remainingTasks}个任务`;
+                      : `达到最大检查次数(${maxChecks})，仍有${activeRequests}个活跃请求`;
 
                   await closeCluster(oldCluster, reason);
                 } else {
                   logger.info(
-                    `[检查 ${checkCount}/${maxChecks}] 等待旧集群完成剩余 ${remainingTasks} 个任务`
+                    `[检查 ${checkCount}/${maxChecks}] 等待旧集群完成剩余 ${activeRequests} 个活跃请求`
                   );
                 }
               } catch (checkError) {
@@ -548,8 +543,8 @@ async function switchToStandbyCluster() {
               }
             }, 5000);
           } else {
-            // 如果没有活跃任务或无法获取任务数，直接关闭
-            await closeCluster(oldCluster, "切换到新集群且似乎无活跃任务");
+            // 如果没有活跃任务，直接关闭
+            await closeCluster(oldCluster, "切换到新集群且无活跃任务");
           }
         } catch (error) {
           logger.error("处理旧集群时出错:", error);
@@ -574,6 +569,8 @@ async function switchToStandbyCluster() {
 
     // 更新切换时间和状态
     lastClusterSwitchTime = Date.now();
+    // 同时更新备用集群冷却时间，防止立即再次创建备用集群
+    standbyClusterCooldownTime = Date.now();
     logger.info(`集群切换完成，时间戳: ${lastClusterSwitchTime}`);
     isClusterSwitching = false;
     return true;
@@ -675,6 +672,9 @@ function monitorMemoryUsage() {
     );
   }
 
+  // 优先处理内存使用率超过阈值的情况，执行集群切换
+  let triggeredHighMemoryAction = false; // 标记是否已触发了高内存操作
+
   // 检查是否需要切换集群
   if (
     memoryUsagePercent > MEMORY_THRESHOLD &&
@@ -687,13 +687,17 @@ function monitorMemoryUsage() {
       )}%，超过阈值 ${MEMORY_THRESHOLD}%，开始切换集群`
     );
     switchToStandbyCluster();
+    triggeredHighMemoryAction = true; // 标记已触发高内存操作
   }
 
   // 如果内存使用率高但还未达到阈值，准备备用集群
+  // 只有未触发高内存操作(切换集群)时才考虑创建备用集群
   if (
+    !triggeredHighMemoryAction && // 避免同时触发切换和创建
     memoryUsagePercent > MEMORY_WARNING_THRESHOLD &&
     !standbyCluster &&
-    !isClusterSwitching
+    !isClusterSwitching &&
+    Date.now() - standbyClusterCooldownTime > STANDBY_CLUSTER_COOLDOWN
   ) {
     logger.info(
       `内存使用率达到 ${memoryUsagePercent.toFixed(
@@ -701,6 +705,21 @@ function monitorMemoryUsage() {
       )}%，超过警告阈值 ${MEMORY_WARNING_THRESHOLD}%，开始准备备用集群`
     );
     prepareStandbyCluster();
+  } else if (
+    !triggeredHighMemoryAction && // 避免冗余日志
+    memoryUsagePercent > MEMORY_WARNING_THRESHOLD &&
+    !standbyCluster &&
+    Date.now() - standbyClusterCooldownTime <= STANDBY_CLUSTER_COOLDOWN
+  ) {
+    // 在冷却期内，记录一条信息但不创建备用集群
+    logger.info(
+      `内存使用率达到 ${memoryUsagePercent.toFixed(
+        2
+      )}%，但在集群切换冷却期内(${Math.round(
+        (STANDBY_CLUSTER_COOLDOWN - (Date.now() - standbyClusterCooldownTime)) /
+          1000
+      )}秒)，暂不创建备用集群`
+    );
   }
 
   // 如果内存使用极高，尝试主动回收垃圾
@@ -708,11 +727,7 @@ function monitorMemoryUsage() {
     logger.warn(
       `内存使用率极高(${memoryUsagePercent.toFixed(2)}%)，尝试回收垃圾`
     );
-    try {
-      global.gc();
-    } catch (e) {
-      // 可能未启用 --expose-gc
-    }
+    tryGarbageCollection();
   }
 
   return memData;
@@ -1812,6 +1827,572 @@ app.post("/pdf/stream", (req, res) => {
   handleStream(req, res);
 });
 
+// 执行单波次的并发测试
+// 保留此函数以供测试端点模块使用
+async function runConcurrentWave(
+  endpoint,
+  testUrl,
+  concurrentCount,
+  parentRequestId,
+  waveId
+) {
+  const startTime = Date.now();
+  const requests = [];
+  const url =
+    testUrl ||
+    "http://222.68.19.101:24081/pdf/?queryCode=202502100943061759499646";
+
+  // 创建并发请求
+  for (let i = 1; i <= concurrentCount; i++) {
+    const requestId = generateRequestId();
+
+    // 基本请求配置
+    const config = {
+      url: url,
+      filename: `压测_波次${waveId}_${endpoint}_${i}`,
+      deviceName: "iPad Pro",
+      width: "1240",
+    };
+
+    // 根据不同端点添加特定配置
+    if (endpoint === "screenshot") {
+      config.deviceName = i % 2 === 0 ? "iPhone X" : "iPad Pro";
+    } else {
+      config.showPageNo = i % 2 === 0;
+    }
+
+    // 创建请求函数
+    const requestFn = async () => {
+      const reqStartTime = Date.now();
+      try {
+        incrementRequestCount();
+
+        // 基本响应对象，确保至少有这些属性
+        let result = {
+          success: false,
+          requestId: requestId,
+          fileName: `压测_波次${waveId}_${endpoint}_${i}`,
+          statusCode: 200,
+        };
+
+        if (endpoint === "screenshot") {
+          // 创建简化的响应对象
+          const mockRes = {
+            status: function (code) {
+              result.statusCode = code;
+              return {
+                json: function (data) {
+                  // 合并返回的数据到结果对象
+                  result = { ...result, ...data };
+                  return result;
+                },
+              };
+            },
+          };
+
+          // 直接调用处理函数
+          await handleScreenshot({ body: config }, mockRes);
+        } else {
+          // 创建简化的响应对象
+          const mockRes = {
+            status: function (code) {
+              result.statusCode = code;
+              return {
+                json: function (data) {
+                  // 合并返回的数据到结果对象
+                  result = { ...result, ...data };
+                  return result;
+                },
+              };
+            },
+          };
+
+          // 直接调用处理函数
+          await handlePdf({ body: config }, mockRes);
+        }
+
+        const duration = Date.now() - reqStartTime;
+        const displayName =
+          result.fileName || `压测_波次${waveId}_${endpoint}_${i}`;
+
+        logger.info(
+          `[${parentRequestId}] 波次${waveId} 请求 ${i} 成功: ${displayName} (耗时: ${duration}ms)`
+        );
+
+        return {
+          success: result.success !== false, // 如果未明确设为false，则视为成功
+          id: i,
+          requestId: result.requestId || requestId,
+          fileName: result.fileName || displayName,
+          duration,
+          statusCode: result.statusCode || 200,
+        };
+      } catch (error) {
+        const duration = Date.now() - reqStartTime;
+        logger.error(
+          `[${parentRequestId}] 波次${waveId} 请求 ${i} 失败 (耗时: ${duration}ms): ${error.message}`
+        );
+
+        return {
+          success: false,
+          id: i,
+          error: error.message,
+          duration,
+          statusCode: error.statusCode || 500,
+        };
+      } finally {
+        decrementRequestCount();
+      }
+    };
+
+    requests.push(requestFn());
+  }
+
+  // 等待所有请求完成
+  const results = await Promise.all(requests);
+  const totalDuration = Date.now() - startTime;
+
+  // 统计结果
+  const successful = results.filter((r) => r.success).length;
+  const failed = results.filter((r) => !r.success).length;
+  const avgDuration =
+    results.reduce((sum, r) => sum + r.duration, 0) / results.length;
+
+  // 排序找出最快和最慢的响应
+  const sortedResults = [...results].sort((a, b) => a.duration - b.duration);
+  const fastest = sortedResults[0];
+  const slowest = sortedResults[sortedResults.length - 1];
+
+  // 构建返回的测试结果对象
+  return {
+    totalRequests: concurrentCount,
+    successful,
+    failed,
+    successRate: `${((successful / concurrentCount) * 100).toFixed(2)}%`,
+    totalDuration,
+    avgDuration: avgDuration.toFixed(2),
+    fastest: {
+      requestId: fastest.requestId,
+      id: fastest.id,
+      duration: fastest.duration,
+    },
+    slowest: {
+      requestId: slowest.requestId,
+      id: slowest.id,
+      duration: slowest.duration,
+    },
+    detailedResults: results.map((r) => ({
+      id: r.id,
+      success: r.success,
+      duration: r.duration,
+      ...(r.success ? { fileName: r.fileName } : { error: r.error }),
+    })),
+  };
+}
+
+// 获取集群状态信息
+function getClusterStatus() {
+  // 获取内存使用情况
+  const memUsage = process.memoryUsage();
+  const systemMemory = os.totalmem();
+  const freeMemory = os.freemem();
+  const usedMemory = systemMemory - freeMemory;
+  const memoryUsagePercent = (usedMemory / systemMemory) * 100;
+
+  return {
+    memory: {
+      // 进程内存
+      heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024),
+      heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024),
+      rss: Math.round(memUsage.rss / 1024 / 1024),
+      external: Math.round((memUsage.external || 0) / 1024 / 1024),
+
+      // 系统内存
+      systemTotal: Math.round(systemMemory / 1024 / 1024),
+      systemFree: Math.round(freeMemory / 1024 / 1024),
+      systemUsed: Math.round(usedMemory / 1024 / 1024),
+      usagePercent: parseFloat(memoryUsagePercent.toFixed(2)),
+    },
+    cluster: {
+      hasCurrentCluster: !!currentCluster,
+      hasStandbyCluster: !!standbyCluster,
+      isClusterSwitching: isClusterSwitching,
+      activeRequests: activeRequests,
+      lastSwitchTime: lastClusterSwitchTime,
+      timeSinceLastSwitch: Date.now() - lastClusterSwitchTime,
+      isInCooldownPeriod:
+        Date.now() - lastClusterSwitchTime <= CLUSTER_SWITCH_COOLDOWN,
+      cooldownRemainingSeconds: Math.max(
+        0,
+        Math.floor(
+          (CLUSTER_SWITCH_COOLDOWN - (Date.now() - lastClusterSwitchTime)) /
+            1000
+        )
+      ),
+
+      thresholds: {
+        memory: MEMORY_THRESHOLD,
+        warning: MEMORY_WARNING_THRESHOLD,
+        cooldownPeriod: CLUSTER_SWITCH_COOLDOWN / 1000,
+        standbyClusterCooldown: STANDBY_CLUSTER_COOLDOWN / 1000,
+      },
+    },
+  };
+}
+
+/**
+ * @swagger
+ * /stress-test:
+ *   post:
+ *     summary: 执行并发压力测试
+ *     description: 执行两波次的并发压力测试，第一波20个请求，第二波50个请求，并提供集群状态监控
+ *     tags: [测试工具]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               endpoint:
+ *                 type: string
+ *                 description: 要测试的端点，可以是"pdf"或"screenshot"
+ *                 enum: ["pdf", "screenshot"]
+ *                 default: "pdf"
+ *               testUrl:
+ *                 type: string
+ *                 description: 测试用的URL
+ *                 default: "http://222.68.19.101:24081/pdf/?queryCode=202502100943061759499646"
+ *               delay:
+ *                 type: integer
+ *                 description: 两波测试之间的延迟时间（毫秒）
+ *                 default: 5000
+ *               forceClusterSwitch:
+ *                 type: boolean
+ *                 description: 是否在波次之间强制触发集群切换
+ *                 default: false
+ *               monitorInterval:
+ *                 type: integer
+ *                 description: 集群状态监控间隔（毫秒）
+ *                 default: 2000
+ *     responses:
+ *       200:
+ *         description: 压力测试结果
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 code:
+ *                   type: integer
+ *                   description: 状态码
+ *                 message:
+ *                   type: string
+ *                   description: 结果消息
+ *                 results:
+ *                   type: object
+ *                   description: 测试结果详情
+ *                   properties:
+ *                     summary:
+ *                       type: object
+ *                       description: 总体测试结果摘要
+ *                     wave1:
+ *                       type: object
+ *                       description: 第一波测试结果
+ *                     wave2:
+ *                       type: object
+ *                       description: 第二波测试结果
+ *                     clusterStatus:
+ *                       type: object
+ *                       description: 集群状态监控记录
+ *                 success:
+ *                   type: boolean
+ *                   description: 测试是否成功完成
+ *                 timestamp:
+ *                   type: integer
+ *                   description: 时间戳
+ *       404:
+ *         description: 在非测试环境中尝试访问测试端点
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: 测试过程中发生错误
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+app.post("/stress-test", async (req, res) => {
+  // 检查是否为测试环境，如果不是，返回404
+  if (process.env.NODE_ENV !== "test") {
+    return res.status(404).json({
+      code: 404,
+      message: "",
+      success: false,
+      timestamp: Date.now(),
+      requestId: generateRequestId(),
+    });
+  }
+
+  const requestId = generateRequestId();
+  const {
+    endpoint = "pdf",
+    testUrl,
+    delay = 5000,
+    forceClusterSwitch = false,
+    monitorInterval = 2000,
+  } = req.body;
+
+  if (!["pdf", "screenshot"].includes(endpoint)) {
+    return res.status(400).json({
+      code: 400,
+      message: "endpoint 必须是 'pdf' 或 'screenshot'",
+      success: false,
+      timestamp: Date.now(),
+      requestId,
+    });
+  }
+
+  try {
+    logger.info(
+      `[${requestId}] 开始并发压力测试: ${endpoint}, 强制集群切换: ${forceClusterSwitch}`
+    );
+
+    // 收集集群状态
+    let clusterStatusHistory = [];
+    let clusterMonitor;
+
+    // 开始集群状态监控
+    const startClusterMonitoring = () => {
+      // 记录初始状态
+      const initialStatus = getClusterStatus();
+      clusterStatusHistory.push({
+        timestamp: Date.now(),
+        phase: "初始状态",
+        status: initialStatus,
+      });
+
+      // 设置监控间隔
+      clusterMonitor = setInterval(() => {
+        const status = getClusterStatus();
+        clusterStatusHistory.push({
+          timestamp: Date.now(),
+          phase: "监控中",
+          status: status,
+        });
+      }, monitorInterval);
+    };
+
+    // 停止集群状态监控
+    const stopClusterMonitoring = () => {
+      if (clusterMonitor) {
+        clearInterval(clusterMonitor);
+        clusterMonitor = null;
+      }
+
+      // 记录最终状态
+      const finalStatus = getClusterStatus();
+      clusterStatusHistory.push({
+        timestamp: Date.now(),
+        phase: "最终状态",
+        status: finalStatus,
+      });
+    };
+
+    // 开始监控
+    startClusterMonitoring();
+
+    // 保存全局测试结果
+    const testResults = {
+      wave1: null,
+      wave2: null,
+    };
+
+    // 执行第一波测试 (20个并发)
+    logger.info(`[${requestId}] 开始第一波测试 (20个并发)`);
+    clusterStatusHistory.push({
+      timestamp: Date.now(),
+      phase: "第一波测试开始",
+      status: getClusterStatus(),
+    });
+
+    const wave1Start = Date.now();
+    testResults.wave1 = await runConcurrentWave(
+      endpoint,
+      testUrl,
+      20,
+      requestId,
+      "1"
+    );
+
+    clusterStatusHistory.push({
+      timestamp: Date.now(),
+      phase: "第一波测试结束",
+      status: getClusterStatus(),
+    });
+
+    // 如果需要强制切换集群，在两波测试之间执行
+    if (forceClusterSwitch) {
+      const beforeSwitchStatus = getClusterStatus();
+      clusterStatusHistory.push({
+        timestamp: Date.now(),
+        phase: "尝试强制集群切换 - 开始",
+        status: beforeSwitchStatus,
+      });
+
+      logger.info(`[${requestId}] 触发强制集群切换`);
+
+      // 检查是否可以切换
+      if (beforeSwitchStatus.cluster.isInCooldownPeriod) {
+        logger.warn(`[${requestId}] 集群在冷却期内，尝试跳过冷却期强制切换`);
+        // 临时修改上次切换时间以绕过冷却期检查
+        const originalSwitchTime = lastClusterSwitchTime;
+        lastClusterSwitchTime = Date.now() - CLUSTER_SWITCH_COOLDOWN - 1000;
+
+        const switchResult = await switchToStandbyCluster();
+
+        // 记录切换结果
+        clusterStatusHistory.push({
+          timestamp: Date.now(),
+          phase: "强制集群切换 - 结果",
+          status: getClusterStatus(),
+          switchSuccess: switchResult,
+          bypassedCooldown: true,
+        });
+
+        // 如果切换失败，恢复原始时间
+        if (!switchResult) {
+          lastClusterSwitchTime = originalSwitchTime;
+          logger.error(`[${requestId}] 强制集群切换失败，恢复原始冷却期时间`);
+        } else {
+          logger.info(`[${requestId}] 强制集群切换成功（跳过冷却期）`);
+        }
+      } else {
+        // 正常切换
+        const switchResult = await switchToStandbyCluster();
+
+        // 记录切换结果
+        clusterStatusHistory.push({
+          timestamp: Date.now(),
+          phase: "强制集群切换 - 结果",
+          status: getClusterStatus(),
+          switchSuccess: switchResult,
+          bypassedCooldown: false,
+        });
+
+        if (switchResult) {
+          logger.info(`[${requestId}] 强制集群切换成功`);
+        } else {
+          logger.error(`[${requestId}] 强制集群切换失败`);
+        }
+      }
+    }
+
+    // 在两波测试之间等待
+    logger.info(
+      `[${requestId}] 第一波测试完成，等待 ${delay}ms 后开始第二波测试`
+    );
+    await new Promise((resolve) => setTimeout(resolve, delay));
+
+    // 执行第二波测试 (50个并发)
+    logger.info(`[${requestId}] 开始第二波测试 (50个并发)`);
+    clusterStatusHistory.push({
+      timestamp: Date.now(),
+      phase: "第二波测试开始",
+      status: getClusterStatus(),
+    });
+
+    const wave2Start = Date.now();
+    testResults.wave2 = await runConcurrentWave(
+      endpoint,
+      testUrl,
+      50,
+      requestId,
+      "2"
+    );
+
+    clusterStatusHistory.push({
+      timestamp: Date.now(),
+      phase: "第二波测试结束",
+      status: getClusterStatus(),
+    });
+
+    // 停止监控
+    stopClusterMonitoring();
+
+    // 计算总体统计数据
+    const totalRequests =
+      testResults.wave1.totalRequests + testResults.wave2.totalRequests;
+    const totalSuccessful =
+      testResults.wave1.successful + testResults.wave2.successful;
+    const totalFailed = testResults.wave1.failed + testResults.wave2.failed;
+    const totalDuration =
+      testResults.wave1.totalDuration + testResults.wave2.totalDuration + delay;
+
+    // 分析集群状态变化
+    const clusterStatusAnalysis = {
+      statusRecordCount: clusterStatusHistory.length,
+      initialStatus: clusterStatusHistory[0],
+      finalStatus: clusterStatusHistory[clusterStatusHistory.length - 1],
+      memoryPeaks: {
+        systemMemory: Math.max(
+          ...clusterStatusHistory.map((s) => s.status.memory.usagePercent)
+        ),
+        heapMemory: Math.max(
+          ...clusterStatusHistory.map((s) => s.status.memory.heapUsed)
+        ),
+      },
+      activeRequestsPeak: Math.max(
+        ...clusterStatusHistory.map((s) => s.status.cluster.activeRequests)
+      ),
+      clusterSwitchEvents: clusterStatusHistory.filter(
+        (s, i, arr) =>
+          i > 0 &&
+          (s.phase.includes("集群切换") ||
+            s.status.cluster.lastSwitchTime !==
+              arr[i - 1].status.cluster.lastSwitchTime)
+      ),
+    };
+
+    // 返回结果
+    res.status(200).json({
+      code: 200,
+      message: "并发压力测试完成",
+      results: {
+        summary: {
+          totalRequests,
+          totalSuccessful,
+          totalFailed,
+          totalDuration,
+          successRate: `${((totalSuccessful / totalRequests) * 100).toFixed(
+            2
+          )}%`,
+        },
+        wave1: testResults.wave1,
+        wave2: testResults.wave2,
+        clusterStatus: {
+          analysis: clusterStatusAnalysis,
+          history: clusterStatusHistory,
+        },
+      },
+      success: true,
+      timestamp: Date.now(),
+      requestId,
+    });
+  } catch (err) {
+    logger.error(`[${requestId}] 压力测试出错:`, err);
+    res.status(500).json({
+      code: 500,
+      message: "压力测试执行失败: " + err.message,
+      success: false,
+      timestamp: Date.now(),
+      requestId,
+    });
+  }
+});
+
 // 添加Swagger UI路由
 app.use(
   "/swagger",
@@ -1827,6 +2408,49 @@ app.use(
     },
   })
 );
+
+// 根据环境变量决定是否加载测试端点
+if (process.env.NODE_ENV === "test") {
+  // 测试端点已直接集成到app.js中，不再需要从单独的模块加载
+  logger.info("测试环境模式已启用，测试端点已可用");
+
+  // 注: test-endpoints.js 模块已弃用，所有测试端点现在直接定义在app.js中
+  /*
+  // 原代码：加载外部测试端点模块 (已弃用)
+  try {
+    const { registerTestEndpoints } = require("./test-endpoints");
+
+    // 传递必要的依赖项
+    const dependencies = {
+      os,
+      process,
+      logger,
+      currentCluster,
+      standbyCluster,
+      isClusterSwitching,
+      activeRequests,
+      lastClusterSwitchTime,
+      CLUSTER_SWITCH_COOLDOWN,
+      MEMORY_THRESHOLD,
+      MEMORY_WARNING_THRESHOLD,
+      STANDBY_CLUSTER_COOLDOWN,
+      generateRequestId,
+      incrementRequestCount,
+      decrementRequestCount,
+      runConcurrentWave,
+      switchToStandbyCluster,
+    };
+
+    // 注册测试端点
+    registerTestEndpoints(app, dependencies);
+    logger.info("测试端点加载成功");
+  } catch (error) {
+    logger.error("加载测试端点失败:", error);
+  }
+  */
+} else {
+  logger.info("标准模式启动，测试端点将返回404");
+}
 
 // 添加 Redoc 路由
 app.use(
@@ -1883,6 +2507,62 @@ function findAvailablePort(startPort) {
   });
 }
 
+// 在 startServer 函数之前添加垃圾回收检查函数
+/**
+ * 检查垃圾回收功能是否可用，并显示相应提示
+ * @returns {boolean} 垃圾回收功能是否可用
+ */
+function checkGarbageCollectionAvailability() {
+  const isGCAvailable = typeof global.gc === "function";
+
+  if (isGCAvailable) {
+    console.log("\x1b[32m%s\x1b[0m", "✓ 垃圾回收功能(global.gc)已启用");
+    console.log(
+      "\x1b[32m%s\x1b[0m",
+      "  内存管理功能将完整可用，可以手动触发垃圾回收"
+    );
+    logger.info("垃圾回收功能(global.gc)已启用");
+  } else {
+    console.log("\x1b[33m%s\x1b[0m", "⚠ 警告: 垃圾回收功能(global.gc)未启用");
+    console.log(
+      "\x1b[33m%s\x1b[0m",
+      "  手动内存管理将受限，无法主动触发垃圾回收"
+    );
+    console.log(
+      "\x1b[33m%s\x1b[0m",
+      "  请使用以下命令启动应用以启用完整内存管理功能:"
+    );
+    console.log("\x1b[36m%s\x1b[0m", "  node --expose-gc app.js");
+    console.log(
+      "\x1b[36m%s\x1b[0m",
+      '  或使用 PM2: pm2 start app.js --node-args="--expose-gc"'
+    );
+    logger.warn("垃圾回收功能(global.gc)未启用，内存管理功能将受限");
+  }
+
+  return isGCAvailable;
+}
+
+// 修改tryGarbageCollection函数，替换现有的直接调用global.gc()的地方
+/**
+ * 尝试执行垃圾回收，如果功能不可用则记录日志
+ */
+function tryGarbageCollection() {
+  try {
+    if (typeof global.gc === "function") {
+      global.gc();
+      logger.info("手动垃圾回收已执行");
+      return true;
+    } else {
+      logger.info("垃圾回收功能不可用，跳过手动垃圾回收");
+      return false;
+    }
+  } catch (error) {
+    logger.error("执行垃圾回收时出错:", error);
+    return false;
+  }
+}
+
 const startServer = async () => {
   const separator = generateSeparator();
   logger.info(separator);
@@ -1892,6 +2572,26 @@ const startServer = async () => {
       timeZone: "Asia/Shanghai",
     })}`
   );
+
+  // 检查测试端点是否启用，如果是，添加高亮提示
+  if (process.env.NODE_ENV === "test") {
+    console.log("\x1b[41m\x1b[37m%s\x1b[0m", " ⚠️ 警告：测试模式已启用 ⚠️ ");
+    console.log(
+      "\x1b[41m\x1b[37m%s\x1b[0m",
+      " 当前版本为测试用途，测试端点已暴露。请严格确保运行环境的安全性，禁止在生产环境中部署 "
+    );
+    console.log(
+      "\x1b[33m%s\x1b[0m",
+      "测试端点包括压力测试功能，可能会对系统造成性能影响\n"
+    );
+
+    logger.warn(
+      "⚠️ 警告：测试模式已启用，当前版本为测试用途，测试端点已暴露。请严格确保运行环境的安全性，禁止在生产环境中部署"
+    );
+  }
+
+  // 检查垃圾回收功能是否可用
+  const gcAvailable = checkGarbageCollectionAvailability();
 
   // 记录内存管理配置
   logger.info(`内存管理配置:`);
@@ -1988,6 +2688,38 @@ const startServer = async () => {
       console.log(
         "   【可选参数: showPageNo（默认为true，若不需要页码显示，则传false）】"
       );
+
+      // 在测试模式下显示压力测试端点
+      if (process.env.NODE_ENV === "test") {
+        console.log("\n\x1b[41m\x1b[37m%s\x1b[0m", "【测试模式特有端点】");
+        console.log("\x1b[31m%s\x1b[0m", "4. POST /stress-test");
+        console.log(
+          "\x1b[31m%s\x1b[0m",
+          "   用于执行并发压力测试，可能对系统性能产生重大影响"
+        );
+        console.log(
+          "\x1b[31m%s\x1b[0m",
+          "   参数: endpoint, testUrl, delay, forceClusterSwitch, monitorInterval"
+        );
+        console.log(
+          "\x1b[31m%s\x1b[0m",
+          "   仅供开发测试使用，禁止在生产环境中调用\n"
+        );
+      } else {
+        console.log("\n\x1b[33m%s\x1b[0m", "【测试端点说明】");
+        console.log(
+          "\x1b[33m%s\x1b[0m",
+          "   测试端点 (如 /stress-test) 仅在测试环境下可用"
+        );
+        console.log(
+          "\x1b[33m%s\x1b[0m",
+          "   要启用测试端点，请使用 NODE_ENV=test 环境变量启动服务"
+        );
+        console.log(
+          "\x1b[33m%s\x1b[0m",
+          "   例如: cross-env NODE_ENV=test node --expose-gc app.js\n"
+        );
+      }
 
       console.log(`\nServer is running on port ${PORT}`);
       console.log(`【服务正在运行在 ${PORT} 端口】`);

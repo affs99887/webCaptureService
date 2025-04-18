@@ -8,8 +8,10 @@
     "node": ">=18.16.0"
   },
   "scripts": {
-    "start": "node app.js",
-    "build": "pkg . --public"
+    "start": "node --expose-gc app.js",
+    "start:test": "cross-env NODE_ENV=test node --expose-gc app.js",
+    "build": "pkg . --public",
+    "build:test": "cross-env NODE_ENV=test pkg . --public"
   },
   "pkg": {
     "targets": [
@@ -27,6 +29,7 @@
     "chrome-launcher": "^1.1.2",
     "cookie-parser": "~1.4.4",
     "cors": "^2.8.5",
+    "cross-env": "^7.0.3",
     "debug": "~2.6.9",
     "express": "~4.16.1",
     "pm2": "^5.4.3",
