@@ -840,6 +840,18 @@ process.on("unhandledRejection", async (reason, promise) => {
   try {
     logger.error("未处理的Promise拒绝:", reason);
 
+    // 检查是否是getData请求相关的错误，如果是则只记录日志不关闭程序
+    const reasonStr = String(reason);
+    if (
+      reasonStr.includes("getData request not found") ||
+      reasonStr.includes("Last getData request failed") ||
+      reasonStr.includes("Last getData request timed out")
+    ) {
+      logger.warn("检测到getData请求相关错误，记录日志但不关闭程序");
+      // 记录错误信息但不执行关闭操作
+      return;
+    }
+
     // 记录当前状态
     const memData = monitorMemoryUsage();
     logger.info(
@@ -1157,19 +1169,27 @@ async function handleScreenshot(req, res) {
     });
   } catch (err) {
     console.error(`[${requestId}] Error details:`, err);
-    logger.error(`[${requestId}] Error details:`, err);
+    logger.error(`[${requestId}] Error details: ${err.message}`);
     let errorInfo = err.message;
     if (err.stack) {
       errorInfo += "\n\nStack trace:\n" + err.stack;
     }
-    res.status(500).json({
-      code: 500,
-      message: "Failed to capture full page mobile screenshot: " + errorInfo,
-      fileName: null,
-      success: false,
-      timestamp: Date.now(),
-      requestId,
-    });
+    // 关闭当前任务相关的资源，但不影响整个程序
+    try {
+      // 记录错误，但不触发未处理的Promise拒绝
+      res.status(500).json({
+        code: 500,
+        message: "Failed to capture full page mobile screenshot: " + errorInfo,
+        fileName: null,
+        success: false,
+        timestamp: Date.now(),
+        requestId,
+      });
+    } catch (responseError) {
+      logger.error(
+        `[${requestId}] 发送错误响应时失败: ${responseError.message}`
+      );
+    }
   } finally {
     decrementRequestCount();
   }
@@ -1293,7 +1313,10 @@ async function captureFullPage(page, requestId) {
     );
   } catch (error) {
     logger.error(`[${requestId}] Error waiting for getData: ${error.message}`);
-    throw error;
+    // 记录错误但不中断整个流程
+    logger.warn(`[${requestId}] 尝试继续执行截图操作，即使getData请求失败`);
+    // 稍微等待一下以确保页面是稳定的
+    await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 
   // 捕获整个页面的截图
@@ -1492,19 +1515,27 @@ async function handlePdf(req, res) {
     });
   } catch (err) {
     console.error(`[${requestId}] Error details:`, err);
-    logger.error(`[${requestId}] Error details:`, err);
+    logger.error(`[${requestId}] Error details: ${err.message}`);
     let errorInfo = err.message;
     if (err.stack) {
       errorInfo += "\n\nStack trace:\n" + err.stack;
     }
-    res.status(500).json({
-      code: 500,
-      message: "Failed to generate PDF: " + errorInfo,
-      fileName: null,
-      success: false,
-      timestamp: Date.now(),
-      requestId,
-    });
+    // 关闭当前任务相关的资源，但不影响整个程序
+    try {
+      // 记录错误，但不触发未处理的Promise拒绝
+      res.status(500).json({
+        code: 500,
+        message: "Failed to generate PDF: " + errorInfo,
+        fileName: null,
+        success: false,
+        timestamp: Date.now(),
+        requestId,
+      });
+    } catch (responseError) {
+      logger.error(
+        `[${requestId}] 发送错误响应时失败: ${responseError.message}`
+      );
+    }
   } finally {
     decrementRequestCount();
   }
@@ -1652,19 +1683,27 @@ async function handleStream(req, res) {
     );
   } catch (err) {
     console.error(`[${requestId}] Error details:`, err);
-    logger.error(`[${requestId}] Error details:`, err);
+    logger.error(`[${requestId}] Error details: ${err.message}`);
     let errorInfo = err.message;
     if (err.stack) {
       errorInfo += "\n\nStack trace:\n" + err.stack;
     }
-    res.status(500).json({
-      code: 500,
-      message: "Failed to generate PDF stream: " + errorInfo,
-      fileName: null,
-      success: false,
-      timestamp: Date.now(),
-      requestId,
-    });
+    // 关闭当前任务相关的资源，但不影响整个程序
+    try {
+      // 记录错误，但不触发未处理的Promise拒绝
+      res.status(500).json({
+        code: 500,
+        message: "Failed to generate PDF stream: " + errorInfo,
+        fileName: null,
+        success: false,
+        timestamp: Date.now(),
+        requestId,
+      });
+    } catch (responseError) {
+      logger.error(
+        `[${requestId}] 发送错误响应时失败: ${responseError.message}`
+      );
+    }
   } finally {
     decrementRequestCount();
   }
