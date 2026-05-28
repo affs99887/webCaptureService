@@ -83,7 +83,8 @@ const swaggerOptions = {
 3. 大文件生成可能需要较长时间，建议设置合适的超时时间
 4. 如遇到问题，请记录requestId以便追踪
 5. 对于动态加载的页面，系统会自动等待加载完成
-6. PDF生成时建议考虑是否需要页码（showPageNo参数）
+6. PDF页码默认显示，可通过showPageNo=false关闭；默认使用v1版本（无报告页眉和数据来源页脚），传version=v2时添加完整页眉页脚
+7. version=v2时必须传报告编号（reportNumber/reportNo/reportCode）和报告发布日期（reportPublishDate/reportDate/publishDate）
 
 ## 错误处理
 - 400：请求参数错误（检查参数完整性和格式）
@@ -1376,10 +1377,235 @@ const waterMark =
     .readFileSync(path.join(process.cwd(), "src", "assets", "watermark.png"))
     .toString("base64");
 
+const PDF_HEADER_FOOTER_MARGIN = {
+  top: "72px",
+  bottom: "58px",
+  left: "0px",
+  right: "0px",
+};
+const PDF_TEMPLATE_HORIZONTAL_PADDING = "36px";
+const PDF_FOOTER_SOURCE_TEXT = "数据来源：中经互联网络有限公司所属";
+const PDF_FOOTER_ICON_PATH = path.join(
+  process.cwd(),
+  "src",
+  "assets",
+  "cxm_foot_icon.png"
+);
+const PDF_DEFAULT_VERSION = "v1";
+const PDF_SUPPORTED_VERSIONS = ["v1", "v2"];
+let cachedPdfFooterIcon = null;
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function getMimeTypeByExtension(filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+  const mimeTypes = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+  };
+
+  return mimeTypes[extension] || "image/png";
+}
+
+function normalizeImageDataUrl(imageData) {
+  if (typeof imageData !== "string") {
+    return "";
+  }
+
+  const trimmedImageData = imageData.trim();
+  if (!trimmedImageData) {
+    return "";
+  }
+
+  if (/^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(trimmedImageData)) {
+    return trimmedImageData;
+  }
+
+  if (/^[A-Za-z0-9+/=\r\n]+$/.test(trimmedImageData)) {
+    return `data:image/png;base64,${trimmedImageData.replace(/\s/g, "")}`;
+  }
+
+  return "";
+}
+
+function getDefaultPdfFooterIcon() {
+  if (cachedPdfFooterIcon !== null) {
+    return cachedPdfFooterIcon;
+  }
+
+  if (!fs.existsSync(PDF_FOOTER_ICON_PATH)) {
+    return "";
+  }
+
+  const mimeType = getMimeTypeByExtension(PDF_FOOTER_ICON_PATH);
+  const imageData = fs.readFileSync(PDF_FOOTER_ICON_PATH).toString("base64");
+  cachedPdfFooterIcon = `data:${mimeType};base64,${imageData}`;
+  return cachedPdfFooterIcon;
+}
+
+function getFirstNonEmptyString(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+
+    const stringValue = String(value).trim();
+    if (stringValue) {
+      return stringValue;
+    }
+  }
+
+  return "";
+}
+
+function getPdfVersion(body) {
+  return (getFirstNonEmptyString(body.version) || PDF_DEFAULT_VERSION).toLowerCase();
+}
+
+function getPdfShowPageNo(body) {
+  const showPageNo = getFirstNonEmptyString(body.showPageNo);
+  if (!showPageNo) {
+    return true;
+  }
+
+  return showPageNo.toLowerCase() !== "false";
+}
+
+function getPdfReportMeta(body) {
+  return {
+    reportNumber: getFirstNonEmptyString(
+      body.reportNumber,
+      body.reportNo,
+      body.reportCode
+    ),
+    reportPublishDate: getFirstNonEmptyString(
+      body.reportPublishDate,
+      body.reportDate,
+      body.publishDate
+    ),
+    footerIcon:
+      normalizeImageDataUrl(body.footerIcon) || getDefaultPdfFooterIcon(),
+  };
+}
+
+function validatePdfVersion(version, reportMeta) {
+  if (!PDF_SUPPORTED_VERSIONS.includes(version)) {
+    return `version must be one of: ${PDF_SUPPORTED_VERSIONS.join(", ")}`;
+  }
+
+  if (version !== "v2") {
+    return "";
+  }
+
+  if (!reportMeta.reportNumber) {
+    return "reportNumber is required when version is v2";
+  }
+
+  if (!reportMeta.reportPublishDate) {
+    return "reportPublishDate is required when version is v2";
+  }
+
+  return "";
+}
+
+function buildPdfHeaderTemplate(reportMeta) {
+  const reportNumber = escapeHtml(reportMeta.reportNumber);
+  const reportPublishDate = escapeHtml(reportMeta.reportPublishDate);
+
+  return `
+    <div style="width: 100%; box-sizing: border-box; padding: 18px ${PDF_TEMPLATE_HORIZONTAL_PADDING} 0; font-family: Arial, 'Microsoft YaHei', sans-serif; color: #26313d; font-size: 13px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #d6d9df; padding-bottom: 10px; line-height: 18px;">
+        <span>报告编号： ${reportNumber}</span>
+        <span>报告发布日期： ${reportPublishDate}</span>
+      </div>
+    </div>
+  `;
+}
+
+function buildPdfPageNumberHtml(showPageNo) {
+  if (!showPageNo) {
+    return "";
+  }
+
+  return `
+    <div style="position: absolute; left: 0; right: 0; bottom: 13px; text-align: center; font-size: 10px; color: #808080; line-height: 16px;">
+      <span class="pageNumber"></span>/<span class="totalPages"></span>
+    </div>
+  `;
+}
+
+function buildPdfPageNumberFooterTemplate(showPageNo) {
+  return `
+    <div style="width: 100%; height: 100%; box-sizing: border-box; position: relative; font-family: Arial, 'Microsoft YaHei', sans-serif;">
+      ${buildPdfPageNumberHtml(showPageNo)}
+    </div>
+  `;
+}
+
+function buildPdfFooterTemplate(reportMeta, showPageNo) {
+  const footerIconHtml = reportMeta.footerIcon
+    ? `<img src="${escapeHtml(
+        reportMeta.footerIcon
+      )}" style="width: 36px; height: 16px; object-fit: contain; margin-left: 6px; position: relative; top: -1px; display: block;" />`
+    : "";
+
+  return `
+    <div style="width: 100%; height: 100%; box-sizing: border-box; position: relative; font-family: Arial, 'Microsoft YaHei', sans-serif; color: #252b33;">
+      ${buildPdfPageNumberHtml(showPageNo)}
+      <div style="position: absolute; right: ${PDF_TEMPLATE_HORIZONTAL_PADDING}; bottom: 13px; display: flex; align-items: center; justify-content: flex-end; font-size: 10px; font-weight: 400; line-height: 16px; white-space: nowrap;">
+        <span>${escapeHtml(PDF_FOOTER_SOURCE_TEXT)}</span>
+        ${footerIconHtml}
+      </div>
+    </div>
+  `;
+}
+
+function applyPdfHeaderFooterOptions(pdfOptions, data) {
+  if (data.version !== "v2") {
+    if (!data.showPageNo) {
+      return {
+        ...pdfOptions,
+        displayHeaderFooter: false,
+      };
+    }
+
+    return {
+      ...pdfOptions,
+      displayHeaderFooter: true,
+      margin: {
+        bottom: PDF_HEADER_FOOTER_MARGIN.bottom,
+      },
+      headerTemplate: "<span></span>",
+      footerTemplate: buildPdfPageNumberFooterTemplate(data.showPageNo),
+    };
+  }
+
+  return {
+    ...pdfOptions,
+    displayHeaderFooter: true,
+    margin: PDF_HEADER_FOOTER_MARGIN,
+    headerTemplate: buildPdfHeaderTemplate(data.reportMeta),
+    footerTemplate: buildPdfFooterTemplate(data.reportMeta, data.showPageNo),
+  };
+}
+
 // 同样修改 handlePdf 函数
 async function handlePdf(req, res) {
   const requestId = generateRequestId();
-  const { url, filename, showPageNo = true } = req.body;
+  const showPageNo = getPdfShowPageNo(req.body);
+  const url = getFirstNonEmptyString(req.body.url);
+  const filename = getFirstNonEmptyString(req.body.filename);
 
   if (!url) {
     logger.info(`[${requestId}] PDF request rejected: URL is required`);
@@ -1407,10 +1633,26 @@ async function handlePdf(req, res) {
     logger.info(
       `[${requestId}] Starting PDF generation with watermark for ${url}`
     );
+    const version = getPdfVersion(req.body);
+    const reportMeta = getPdfReportMeta(req.body);
+    const versionError = validatePdfVersion(version, reportMeta);
+
+    if (versionError) {
+      logger.info(`[${requestId}] PDF request rejected: ${versionError}`);
+      return res.status(400).json({
+        code: 400,
+        message: versionError,
+        fileName: null,
+        success: false,
+        timestamp: Date.now(),
+        requestId,
+      });
+    }
+
     const cluster = await setupCluster();
 
     const result = await cluster.execute(
-      { url, filename, showPageNo, requestId },
+      { url, filename, showPageNo, requestId, version, reportMeta },
       async ({ page, data }) => {
         const deviceName = "iPad Pro";
         const device = mobileDevices[deviceName];
@@ -1445,8 +1687,6 @@ async function handlePdf(req, res) {
         await page.evaluate((waterMarkData) => {
           const style = document.createElement("style");
           style.textContent = `
-            @page:first { margin-top: 0; margin-bottom: 0; }
-            @page { margin-top: 5mm; margin-bottom: 10mm; }
             body, html { background-color: white !important; position: relative; }
             
             /* 创建水印容器 */
@@ -1478,22 +1718,11 @@ async function handlePdf(req, res) {
         let scale = Math.min(a4Width / device.viewport.width, 2);
         scale = Math.max(scale, 0.1);
 
-        const pdfOptions = {
+        const pdfOptions = applyPdfHeaderFooterOptions({
           format: "A4",
           printBackground: true,
           scale: scale,
-          displayHeaderFooter: data.showPageNo,
-          headerTemplate: "<span></span>",
-          footerTemplate: data.showPageNo
-            ? `
-              <div style="width: 100%; font-size: 10px; text-align: center; color: #808080; position: relative;">
-                <span style="position: absolute; left: 0; right: 0; top: -5px;">
-                  <span class="pageNumber"></span>/<span class="totalPages"></span>
-                </span>
-              </div>
-            `
-            : "<span></span>",
-        };
+        }, data);
 
         const pdf = await page.pdf(pdfOptions);
         return pdf;
@@ -1544,7 +1773,9 @@ async function handlePdf(req, res) {
 // 同样修改 handleStream 函数
 async function handleStream(req, res) {
   const requestId = generateRequestId();
-  const { url, filename, showPageNo = true } = req.body;
+  const showPageNo = getPdfShowPageNo(req.body);
+  const url = getFirstNonEmptyString(req.body.url);
+  const filename = getFirstNonEmptyString(req.body.filename);
 
   if (!url) {
     logger.info(`[${requestId}] PDF stream request rejected: URL is required`);
@@ -1572,10 +1803,28 @@ async function handleStream(req, res) {
     logger.info(
       `[${requestId}] Starting PDF stream generation with watermark for ${url}`
     );
+    const version = getPdfVersion(req.body);
+    const reportMeta = getPdfReportMeta(req.body);
+    const versionError = validatePdfVersion(version, reportMeta);
+
+    if (versionError) {
+      logger.info(
+        `[${requestId}] PDF stream request rejected: ${versionError}`
+      );
+      return res.status(400).json({
+        code: 400,
+        message: versionError,
+        fileName: null,
+        success: false,
+        timestamp: Date.now(),
+        requestId,
+      });
+    }
+
     const cluster = await setupCluster();
 
     const pdfBuffer = await cluster.execute(
-      { url, filename, showPageNo, requestId },
+      { url, filename, showPageNo, requestId, version, reportMeta },
       async ({ page, data }) => {
         const deviceName = "iPad Pro";
         const device = mobileDevices[deviceName];
@@ -1610,8 +1859,6 @@ async function handleStream(req, res) {
         await page.evaluate((waterMarkData) => {
           const style = document.createElement("style");
           style.textContent = `
-            @page:first { margin-top: 0; margin-bottom: 0; }
-            @page { margin-top: 5mm; margin-bottom: 10mm; }
             body, html { background-color: white !important; position: relative; }
             
             /* 创建水印容器 */
@@ -1643,22 +1890,11 @@ async function handleStream(req, res) {
         let scale = Math.min(a4Width / device.viewport.width, 2);
         scale = Math.max(scale, 0.1);
 
-        const pdfOptions = {
+        const pdfOptions = applyPdfHeaderFooterOptions({
           format: "A4",
           printBackground: true,
           scale: scale,
-          displayHeaderFooter: data.showPageNo,
-          headerTemplate: "<span></span>",
-          footerTemplate: data.showPageNo
-            ? `
-              <div style="width: 100%; font-size: 10px; text-align: center; color: #808080; position: relative;">
-                <span style="position: absolute; left: 0; right: 0; top: -5px;">
-                  <span class="pageNumber"></span>/<span class="totalPages"></span>
-                </span>
-              </div>
-            `
-            : "<span></span>",
-        };
+        }, data);
 
         const pdf = await page.pdf(pdfOptions);
         return pdf;
@@ -1786,10 +2022,24 @@ app.post("/screenshot", (req, res) => {
  *               filename:
  *                 type: string
  *                 description: 保存的文件名（不需要包含.pdf后缀）
+ *               version:
+ *                 type: string
+ *                 description: PDF版本；v1无报告页眉和数据来源页脚（默认），v2显示完整页眉页脚
+ *                 enum: [v1, v2]
+ *                 default: v1
  *               showPageNo:
  *                 type: boolean
- *                 description: 是否显示页码
+ *                 description: 是否显示页码，默认true；空值视为未传
  *                 default: true
+ *               reportNumber:
+ *                 type: string
+ *                 description: 报告编号（也兼容reportNo、reportCode）；version=v2时必填
+ *               reportPublishDate:
+ *                 type: string
+ *                 description: 报告发布日期（也兼容reportDate、publishDate）；version=v2时必填
+ *               footerIcon:
+ *                 type: string
+ *                 description: 页脚icon，支持dataURL或base64；version=v2时生效，不传时读取src/assets/cxm_foot_icon.png
  *     responses:
  *       200:
  *         description: PDF生成成功
@@ -1837,10 +2087,24 @@ app.post("/pdf", (req, res) => {
  *               filename:
  *                 type: string
  *                 description: 下载时显示的文件名（不需要包含.pdf后缀）
+ *               version:
+ *                 type: string
+ *                 description: PDF版本；v1无报告页眉和数据来源页脚（默认），v2显示完整页眉页脚
+ *                 enum: [v1, v2]
+ *                 default: v1
  *               showPageNo:
  *                 type: boolean
- *                 description: 是否显示页码
+ *                 description: 是否显示页码，默认true；空值视为未传
  *                 default: true
+ *               reportNumber:
+ *                 type: string
+ *                 description: 报告编号（也兼容reportNo、reportCode）；version=v2时必填
+ *               reportPublishDate:
+ *                 type: string
+ *                 description: 报告发布日期（也兼容reportDate、publishDate）；version=v2时必填
+ *               footerIcon:
+ *                 type: string
+ *                 description: 页脚icon，支持dataURL或base64；version=v2时生效，不传时读取src/assets/cxm_foot_icon.png
  *     responses:
  *       200:
  *         description: PDF流生成成功
@@ -2712,20 +2976,20 @@ const startServer = async () => {
       console.log("2. POST /pdf");
       console.log("   Required parameters: url, filename");
       console.log(
-        "   Optional parameters: showPageNo (Default value is true, if there is no need for displaying page numbers, sends false)."
+        "   Optional parameters: version (v1 default without report header/source footer, v2 with full header/footer), showPageNo (default true), reportNumber/reportNo/reportCode, reportPublishDate/reportDate/publishDate, footerIcon."
       );
       console.log("   【必填参数: url, filename】");
       console.log(
-        "   【可选参数: showPageNo（默认为true，若不需要页码显示，则传false）】"
+        "   【可选参数: version（默认v1无报告页眉和数据来源页脚；v2有完整页头页脚，且必须传报告编号和报告发布日期）、showPageNo（默认true，传false隐藏页码）、reportNumber/reportNo/reportCode、reportPublishDate/reportDate/publishDate、footerIcon（dataURL或base64）】"
       );
       console.log("3. POST /pdf/stream");
       console.log("   Required parameters: url, filename");
       console.log(
-        "   Optional parameters: showPageNo (Default is true; set to false if page numbers are not needed)."
+        "   Optional parameters: version (v1 default without report header/source footer, v2 with full header/footer), showPageNo (default true), reportNumber/reportNo/reportCode, reportPublishDate/reportDate/publishDate, footerIcon."
       );
       console.log("   【必填参数: url, filename】");
       console.log(
-        "   【可选参数: showPageNo（默认为true，若不需要页码显示，则传false）】"
+        "   【可选参数: version（默认v1无报告页眉和数据来源页脚；v2有完整页头页脚，且必须传报告编号和报告发布日期）、showPageNo（默认true，传false隐藏页码）、reportNumber/reportNo/reportCode、reportPublishDate/reportDate/publishDate、footerIcon（dataURL或base64）】"
       );
 
       // 在测试模式下显示压力测试端点
