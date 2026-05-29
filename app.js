@@ -50,61 +50,6 @@ const swaggerOptions = {
     info: {
       title: "Web Capture Service API",
       version: "1.0.0",
-      description: `
-# 简介
-这是一个提供网页截图和PDF生成功能的服务API。支持多种设备模拟和自定义配置。
-
-## 主要功能
-- 网页截图（支持多种设备模拟）
-- PDF生成（支持页码和水印）
-- PDF流式下载
-
-## 技术特点
-- 使用Puppeteer进行页面渲染
-- 支持集群模式处理请求（最大并发数：10）
-- 自动等待页面加载完成（包括动态内容）
-- 内置水印保护
-- 支持自定义视口大小
-- 支持多种移动设备模拟
-
-## 性能与限制
-- 最大并发请求数：10
-- 单个请求超时时间：180秒
-- 重试次数：3次（间隔5秒）
-- PDF纸张大小：A4（794x1123像素）
-- 支持的设备：${Object.keys(mobileDevices).join(", ")}
-- 生成的文件存储位置：
-  * 截图：/screenshots 目录
-  * PDF：/pdfs 目录
-
-## 使用建议
-1. 建议为每个请求使用唯一的文件名，避免覆盖
-2. URL必须包含完整的协议（http://或https://）
-3. 大文件生成可能需要较长时间，建议设置合适的超时时间
-4. 如遇到问题，请记录requestId以便追踪
-5. 对于动态加载的页面，系统会自动等待加载完成
-6. PDF页码默认显示，可通过showPageNo=false关闭；默认使用v1版本（无报告页眉和数据来源页脚），传version=v2时添加完整页眉页脚
-7. version=v2时必须传报告编号（reportNumber/reportNo/reportCode）和报告发布日期（reportPublishDate/reportDate/publishDate）
-
-## 错误处理
-- 400：请求参数错误（检查参数完整性和格式）
-- 500：服务器内部错误（检查URL可访问性）
-- 503：服务暂时不可用（服务可能正在重启）
-
-## 注意事项
-- 所有生成的文件都会自动添加水印保护
-- 文件名不需要包含扩展名（.png或.pdf）
-- 建议在调用API时添加错误处理机制
-- 跨域访问需要预先配置允许的域名
-- 建议在请求头中设置合理的超时时间
-- 大文件处理时注意内存使用
-
-## 安全说明
-- 支持API密钥认证（X-API-Key请求头）
-- 所有请求都经过CORS策略控制
-- 支持SSL/TLS加密传输
-- 文件生成过程中有防护机制
-      `,
       contact: {
         name: "技术支持",
         email: "support@example.com",
@@ -137,7 +82,7 @@ const swaggerOptions = {
             message: {
               type: "string",
               description: "错误详细信息",
-              example: "Failed to generate screenshot: URL is not accessible",
+              example: "生成整页截图失败: 目标 URL 无法访问",
             },
             success: {
               type: "boolean",
@@ -1054,7 +999,7 @@ async function handleScreenshot(req, res) {
   if (!filename) {
     return res.status(400).json({
       code: 400,
-      message: "Filename 是必需的",
+      message: "filename 是必需的",
       fileName: null,
       success: false,
       timestamp: Date.now(),
@@ -1064,7 +1009,7 @@ async function handleScreenshot(req, res) {
   if (width && isNaN(parseInt(width))) {
     return res.status(400).json({
       code: 400,
-      message: "Width 必须是一个有效的数字",
+      message: "width 必须是一个有效的数字",
       fileName: null,
       success: false,
       timestamp: Date.now(),
@@ -1084,7 +1029,7 @@ async function handleScreenshot(req, res) {
         const device = mobileDevices[data.deviceName];
         if (!device) {
           throw new Error(
-            `[${data.requestId}] Device "${data.deviceName}" not found`
+            `[${data.requestId}] 设备 "${data.deviceName}" 未找到`
           );
         }
 
@@ -1180,7 +1125,7 @@ async function handleScreenshot(req, res) {
       // 记录错误，但不触发未处理的Promise拒绝
       res.status(500).json({
         code: 500,
-        message: "Failed to capture full page mobile screenshot: " + errorInfo,
+        message: "生成整页截图失败: " + errorInfo,
         fileName: null,
         success: false,
         timestamp: Date.now(),
@@ -1418,27 +1363,6 @@ function getMimeTypeByExtension(filePath) {
   return mimeTypes[extension] || "image/png";
 }
 
-function normalizeImageDataUrl(imageData) {
-  if (typeof imageData !== "string") {
-    return "";
-  }
-
-  const trimmedImageData = imageData.trim();
-  if (!trimmedImageData) {
-    return "";
-  }
-
-  if (/^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(trimmedImageData)) {
-    return trimmedImageData;
-  }
-
-  if (/^[A-Za-z0-9+/=\r\n]+$/.test(trimmedImageData)) {
-    return `data:image/png;base64,${trimmedImageData.replace(/\s/g, "")}`;
-  }
-
-  return "";
-}
-
 function getDefaultPdfFooterIcon() {
   if (cachedPdfFooterIcon !== null) {
     return cachedPdfFooterIcon;
@@ -1494,14 +1418,12 @@ function getPdfReportMeta(body) {
       body.reportDate,
       body.publishDate
     ),
-    footerIcon:
-      normalizeImageDataUrl(body.footerIcon) || getDefaultPdfFooterIcon(),
   };
 }
 
 function validatePdfVersion(version, reportMeta) {
   if (!PDF_SUPPORTED_VERSIONS.includes(version)) {
-    return `version must be one of: ${PDF_SUPPORTED_VERSIONS.join(", ")}`;
+    return `version 参数必须是以下值之一：${PDF_SUPPORTED_VERSIONS.join(", ")}`;
   }
 
   if (version !== "v2") {
@@ -1509,11 +1431,11 @@ function validatePdfVersion(version, reportMeta) {
   }
 
   if (!reportMeta.reportNumber) {
-    return "reportNumber is required when version is v2";
+    return "version 为 v2 时必须传报告编号（reportNumber）";
   }
 
   if (!reportMeta.reportPublishDate) {
-    return "reportPublishDate is required when version is v2";
+    return "version 为 v2 时必须传报告发布日期（reportPublishDate）";
   }
 
   return "";
@@ -1553,10 +1475,11 @@ function buildPdfPageNumberFooterTemplate(showPageNo) {
   `;
 }
 
-function buildPdfFooterTemplate(reportMeta, showPageNo) {
-  const footerIconHtml = reportMeta.footerIcon
+function buildPdfFooterTemplate(showPageNo) {
+  const footerIcon = getDefaultPdfFooterIcon();
+  const footerIconHtml = footerIcon
     ? `<img src="${escapeHtml(
-        reportMeta.footerIcon
+        footerIcon
       )}" style="width: 36px; height: 16px; object-fit: contain; margin-left: 6px; position: relative; top: -1px; display: block;" />`
     : "";
 
@@ -1596,7 +1519,7 @@ function applyPdfHeaderFooterOptions(pdfOptions, data) {
     displayHeaderFooter: true,
     margin: PDF_HEADER_FOOTER_MARGIN,
     headerTemplate: buildPdfHeaderTemplate(data.reportMeta),
-    footerTemplate: buildPdfFooterTemplate(data.reportMeta, data.showPageNo),
+    footerTemplate: buildPdfFooterTemplate(data.showPageNo),
   };
 }
 
@@ -1611,7 +1534,7 @@ async function handlePdf(req, res) {
     logger.info(`[${requestId}] PDF request rejected: URL is required`);
     return res.status(400).json({
       code: 400,
-      message: "URL is required",
+      message: "URL 是必需的",
       fileName: null,
       success: false,
       timestamp: Date.now(),
@@ -1621,7 +1544,7 @@ async function handlePdf(req, res) {
   if (!filename) {
     return res.status(400).json({
       code: 400,
-      message: "Filename is required",
+      message: "filename 是必需的",
       fileName: null,
       success: false,
       timestamp: Date.now(),
@@ -1754,7 +1677,7 @@ async function handlePdf(req, res) {
       // 记录错误，但不触发未处理的Promise拒绝
       res.status(500).json({
         code: 500,
-        message: "Failed to generate PDF: " + errorInfo,
+        message: "生成 PDF 失败: " + errorInfo,
         fileName: null,
         success: false,
         timestamp: Date.now(),
@@ -1781,7 +1704,7 @@ async function handleStream(req, res) {
     logger.info(`[${requestId}] PDF stream request rejected: URL is required`);
     return res.status(400).json({
       code: 400,
-      message: "URL is required",
+      message: "URL 是必需的",
       fileName: null,
       success: false,
       timestamp: Date.now(),
@@ -1791,7 +1714,7 @@ async function handleStream(req, res) {
   if (!filename) {
     return res.status(400).json({
       code: 400,
-      message: "Filename is required",
+      message: "filename 是必需的",
       fileName: null,
       success: false,
       timestamp: Date.now(),
@@ -1929,7 +1852,7 @@ async function handleStream(req, res) {
       // 记录错误，但不触发未处理的Promise拒绝
       res.status(500).json({
         code: 500,
-        message: "Failed to generate PDF stream: " + errorInfo,
+        message: "生成 PDF 流失败: " + errorInfo,
         fileName: null,
         success: false,
         timestamp: Date.now(),
@@ -1950,7 +1873,17 @@ async function handleStream(req, res) {
  * /screenshot:
  *   post:
  *     summary: 生成网页截图
- *     description: 将网页转换为图片格式（PNG）
+ *     description: |
+ *       将网页转换为图片格式（PNG）。
+ *
+ *       **可用字段**
+ *
+ *       | 字段 | 类型 | 必填 | 默认值 | 说明 |
+ *       | --- | --- | --- | --- | --- |
+ *       | url | string | 是 | - | 需要截图的网页URL（需包含 http:// 或 https://） |
+ *       | filename | string | 是 | - | 保存的文件名（无需包含 .png 后缀） |
+ *       | deviceName | string | 否 | iPad Pro | 设备型号，可选 `iPhone X` / `iPad Pro` |
+ *       | width | integer | 否 | - | 自定义视口宽度（像素），优先级高于 deviceName |
  *     tags: [截图服务]
  *     requestBody:
  *       required: true
@@ -1965,16 +1898,21 @@ async function handleStream(req, res) {
  *               url:
  *                 type: string
  *                 description: 需要截图的网页URL（需要包含http://或https://）
+ *                 example: "https://example.com"
  *               filename:
  *                 type: string
  *                 description: 保存的文件名（不需要包含.png后缀）
+ *                 example: "example-screenshot"
  *               deviceName:
  *                 type: string
  *                 description: 设备型号（默认使用iPad Pro）
- *                 enum: ${JSON.stringify(Object.keys(mobileDevices))}
+ *                 enum: ["iPhone X", "iPad Pro"]
+ *                 default: "iPad Pro"
+ *                 example: "iPad Pro"
  *               width:
  *                 type: integer
  *                 description: 自定义视口宽度（像素），优先级高于deviceName
+ *                 example: 1280
  *     responses:
  *       200:
  *         description: 截图生成成功
@@ -2004,7 +1942,19 @@ app.post("/screenshot", (req, res) => {
  * /pdf:
  *   post:
  *     summary: 生成PDF文件
- *     description: 将网页转换为PDF文件并保存到服务器
+ *     description: |
+ *       将网页转换为PDF文件并保存到服务器。
+ *
+ *       **可用字段**
+ *
+ *       | 字段 | 类型 | 必填 | 默认值 | 说明 |
+ *       | --- | --- | --- | --- | --- |
+ *       | url | string | 是 | - | 需要转换的网页URL（需包含 http:// 或 https://） |
+ *       | filename | string | 是 | - | 保存的文件名（无需包含 .pdf 后缀） |
+ *       | version | string | 否 | v1 | PDF版本；v1 无报告页眉和数据来源页脚，v2 显示完整页眉页脚 |
+ *       | showPageNo | boolean | 否 | true | 是否显示页码；空值视为未传 |
+ *       | reportNumber | string | 否 | - | 报告编号（兼容 reportNo、reportCode）；version=v2 时必填 |
+ *       | reportPublishDate | string | 否 | - | 报告发布日期（兼容 reportDate、publishDate）；version=v2 时必填 |
  *     tags: [PDF服务]
  *     requestBody:
  *       required: true
@@ -2019,27 +1969,30 @@ app.post("/screenshot", (req, res) => {
  *               url:
  *                 type: string
  *                 description: 需要转换的网页URL（需要包含http://或https://）
+ *                 example: "https://example.com"
  *               filename:
  *                 type: string
  *                 description: 保存的文件名（不需要包含.pdf后缀）
+ *                 example: "example-report"
  *               version:
  *                 type: string
  *                 description: PDF版本；v1无报告页眉和数据来源页脚（默认），v2显示完整页眉页脚
  *                 enum: [v1, v2]
  *                 default: v1
+ *                 example: "v1"
  *               showPageNo:
  *                 type: boolean
  *                 description: 是否显示页码，默认true；空值视为未传
  *                 default: true
+ *                 example: true
  *               reportNumber:
  *                 type: string
  *                 description: 报告编号（也兼容reportNo、reportCode）；version=v2时必填
+ *                 example: "BG-2024-001"
  *               reportPublishDate:
  *                 type: string
  *                 description: 报告发布日期（也兼容reportDate、publishDate）；version=v2时必填
- *               footerIcon:
- *                 type: string
- *                 description: 页脚icon，支持dataURL或base64；version=v2时生效，不传时读取src/assets/cxm_foot_icon.png
+ *                 example: "2024-01-01"
  *     responses:
  *       200:
  *         description: PDF生成成功
@@ -2069,7 +2022,19 @@ app.post("/pdf", (req, res) => {
  * /pdf/stream:
  *   post:
  *     summary: 生成PDF流
- *     description: 将网页转换为PDF并直接返回文件流（用于直接下载）
+ *     description: |
+ *       将网页转换为PDF并直接返回文件流（用于直接下载）。
+ *
+ *       **可用字段**
+ *
+ *       | 字段 | 类型 | 必填 | 默认值 | 说明 |
+ *       | --- | --- | --- | --- | --- |
+ *       | url | string | 是 | - | 需要转换的网页URL（需包含 http:// 或 https://） |
+ *       | filename | string | 是 | - | 下载时显示的文件名（无需包含 .pdf 后缀） |
+ *       | version | string | 否 | v1 | PDF版本；v1 无报告页眉和数据来源页脚，v2 显示完整页眉页脚 |
+ *       | showPageNo | boolean | 否 | true | 是否显示页码；空值视为未传 |
+ *       | reportNumber | string | 否 | - | 报告编号（兼容 reportNo、reportCode）；version=v2 时必填 |
+ *       | reportPublishDate | string | 否 | - | 报告发布日期（兼容 reportDate、publishDate）；version=v2 时必填 |
  *     tags: [PDF服务]
  *     requestBody:
  *       required: true
@@ -2084,27 +2049,30 @@ app.post("/pdf", (req, res) => {
  *               url:
  *                 type: string
  *                 description: 需要转换的网页URL（需要包含http://或https://）
+ *                 example: "https://example.com"
  *               filename:
  *                 type: string
  *                 description: 下载时显示的文件名（不需要包含.pdf后缀）
+ *                 example: "example-report"
  *               version:
  *                 type: string
  *                 description: PDF版本；v1无报告页眉和数据来源页脚（默认），v2显示完整页眉页脚
  *                 enum: [v1, v2]
  *                 default: v1
+ *                 example: "v1"
  *               showPageNo:
  *                 type: boolean
  *                 description: 是否显示页码，默认true；空值视为未传
  *                 default: true
+ *                 example: true
  *               reportNumber:
  *                 type: string
  *                 description: 报告编号（也兼容reportNo、reportCode）；version=v2时必填
+ *                 example: "BG-2024-001"
  *               reportPublishDate:
  *                 type: string
  *                 description: 报告发布日期（也兼容reportDate、publishDate）；version=v2时必填
- *               footerIcon:
- *                 type: string
- *                 description: 页脚icon，支持dataURL或base64；version=v2时生效，不传时读取src/assets/cxm_foot_icon.png
+ *                 example: "2024-01-01"
  *     responses:
  *       200:
  *         description: PDF流生成成功
@@ -2976,20 +2944,20 @@ const startServer = async () => {
       console.log("2. POST /pdf");
       console.log("   Required parameters: url, filename");
       console.log(
-        "   Optional parameters: version (v1 default without report header/source footer, v2 with full header/footer), showPageNo (default true), reportNumber/reportNo/reportCode, reportPublishDate/reportDate/publishDate, footerIcon."
+        "   Optional parameters: version (v1 default without report header/source footer, v2 with full header/footer), showPageNo (default true), reportNumber/reportNo/reportCode, reportPublishDate/reportDate/publishDate."
       );
       console.log("   【必填参数: url, filename】");
       console.log(
-        "   【可选参数: version（默认v1无报告页眉和数据来源页脚；v2有完整页头页脚，且必须传报告编号和报告发布日期）、showPageNo（默认true，传false隐藏页码）、reportNumber/reportNo/reportCode、reportPublishDate/reportDate/publishDate、footerIcon（dataURL或base64）】"
+        "   【可选参数: version（默认v1无报告页眉和数据来源页脚；v2有完整页头页脚，且必须传报告编号和报告发布日期）、showPageNo（默认true，传false隐藏页码）、reportNumber/reportNo/reportCode、reportPublishDate/reportDate/publishDate】"
       );
       console.log("3. POST /pdf/stream");
       console.log("   Required parameters: url, filename");
       console.log(
-        "   Optional parameters: version (v1 default without report header/source footer, v2 with full header/footer), showPageNo (default true), reportNumber/reportNo/reportCode, reportPublishDate/reportDate/publishDate, footerIcon."
+        "   Optional parameters: version (v1 default without report header/source footer, v2 with full header/footer), showPageNo (default true), reportNumber/reportNo/reportCode, reportPublishDate/reportDate/publishDate."
       );
       console.log("   【必填参数: url, filename】");
       console.log(
-        "   【可选参数: version（默认v1无报告页眉和数据来源页脚；v2有完整页头页脚，且必须传报告编号和报告发布日期）、showPageNo（默认true，传false隐藏页码）、reportNumber/reportNo/reportCode、reportPublishDate/reportDate/publishDate、footerIcon（dataURL或base64）】"
+        "   【可选参数: version（默认v1无报告页眉和数据来源页脚；v2有完整页头页脚，且必须传报告编号和报告发布日期）、showPageNo（默认true，传false隐藏页码）、reportNumber/reportNo/reportCode、reportPublishDate/reportDate/publishDate】"
       );
 
       // 在测试模式下显示压力测试端点
