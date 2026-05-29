@@ -14,6 +14,7 @@ const os = require("os");
 const swaggerUi = require("swagger-ui-express");
 const swaggerJsdoc = require("swagger-jsdoc");
 const redoc = require("redoc-express");
+const { PDFDocument } = require("pdf-lib");
 
 // 定义支持的移动设备
 const mobileDevices = {
@@ -1336,8 +1337,10 @@ const PDF_FOOTER_ICON_PATH = path.join(
   "assets",
   "cxm_foot_icon.png"
 );
-const PDF_DEFAULT_VERSION = "v1";
-const PDF_SUPPORTED_VERSIONS = ["v1", "v2"];
+// 封面图加载的最大重试次数，重试用尽仍拿不到图片则跳过封面
+const PDF_COVER_MAX_RETRIES = 3;
+// timeOut 参数最大等待时间（毫秒），避免触发请求超时
+const PDF_MAX_WAIT_TIME = 60 * 1000;
 let cachedPdfFooterIcon = null;
 
 function escapeHtml(value) {
@@ -1393,10 +1396,6 @@ function getFirstNonEmptyString(...values) {
   return "";
 }
 
-function getPdfVersion(body) {
-  return (getFirstNonEmptyString(body.version) || PDF_DEFAULT_VERSION).toLowerCase();
-}
-
 function getPdfShowPageNo(body) {
   const showPageNo = getFirstNonEmptyString(body.showPageNo);
   if (!showPageNo) {
@@ -1406,50 +1405,81 @@ function getPdfShowPageNo(body) {
   return showPageNo.toLowerCase() !== "false";
 }
 
-function getPdfReportMeta(body) {
-  return {
-    reportNumber: getFirstNonEmptyString(
-      body.reportNumber,
-      body.reportNo,
-      body.reportCode
-    ),
-    reportPublishDate: getFirstNonEmptyString(
-      body.reportPublishDate,
-      body.reportDate,
-      body.publishDate
-    ),
+// footer 参数：是否显示页脚（数据来源文案 + 图标），不传默认不显示
+function getPdfShowFooter(body) {
+  const footer = getFirstNonEmptyString(body.footer);
+  if (!footer) {
+    return false;
+  }
+
+  return footer.toLowerCase() !== "false";
+}
+
+// header 参数：页眉左/中/右三栏自由文本。可传对象或 JSON 字符串；
+// 三栏均为空或未传时返回 null（不显示页眉）
+function getPdfHeader(body) {
+  let raw = body.header;
+  if (typeof raw === "string") {
+    const text = raw.trim();
+    if (!text) {
+      return null;
+    }
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      return null;
+    }
+  }
+
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+
+  const header = {
+    left: getFirstNonEmptyString(raw.left),
+    center: getFirstNonEmptyString(raw.center),
+    right: getFirstNonEmptyString(raw.right),
   };
+
+  if (!header.left && !header.center && !header.right) {
+    return null;
+  }
+
+  return header;
 }
 
-function validatePdfVersion(version, reportMeta) {
-  if (!PDF_SUPPORTED_VERSIONS.includes(version)) {
-    return `version 参数必须是以下值之一：${PDF_SUPPORTED_VERSIONS.join(", ")}`;
-  }
-
-  if (version !== "v2") {
-    return "";
-  }
-
-  if (!reportMeta.reportNumber) {
-    return "version 为 v2 时必须传报告编号（reportNumber）";
-  }
-
-  if (!reportMeta.reportPublishDate) {
-    return "version 为 v2 时必须传报告发布日期（reportPublishDate）";
-  }
-
-  return "";
+// cover 参数：封面图网络地址。未传返回空串（不显示封面）
+function getPdfCoverUrl(body) {
+  return getFirstNonEmptyString(body.cover);
 }
 
-function buildPdfHeaderTemplate(reportMeta) {
-  const reportNumber = escapeHtml(reportMeta.reportNumber);
-  const reportPublishDate = escapeHtml(reportMeta.reportPublishDate);
+// timeOut 参数：生成 PDF 前先等待页面渲染的秒数，超过上限按上限处理
+function getPdfWaitTime(body) {
+  const raw = getFirstNonEmptyString(body.timeOut);
+  if (!raw) {
+    return 0;
+  }
+
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return 0;
+  }
+
+  return Math.min(Math.round(seconds * 1000), PDF_MAX_WAIT_TIME);
+}
+
+// 页眉模板：左/中/右三栏自由文本，底部带分隔线
+function buildPdfHeaderTemplate(header) {
+  const left = escapeHtml(header.left || "");
+  const center = escapeHtml(header.center || "");
+  const right = escapeHtml(header.right || "");
 
   return `
     <div style="width: 100%; box-sizing: border-box; padding: 18px ${PDF_TEMPLATE_HORIZONTAL_PADDING} 0; font-family: Arial, 'Microsoft YaHei', sans-serif; color: #26313d; font-size: 13px;">
-      <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #d6d9df; padding-bottom: 10px; line-height: 18px;">
-        <span>报告编号： ${reportNumber}</span>
-        <span>报告发布日期： ${reportPublishDate}</span>
+      <div style="display: flex; align-items: center; border-bottom: 1px solid #d6d9df; padding-bottom: 10px; line-height: 18px;">
+        <span style="flex: 1; text-align: left;">${left}</span>
+        <span style="flex: 1; text-align: center;">${center}</span>
+        <span style="flex: 1; text-align: right;">${right}</span>
       </div>
     </div>
   `;
@@ -1467,66 +1497,165 @@ function buildPdfPageNumberHtml(showPageNo) {
   `;
 }
 
-function buildPdfPageNumberFooterTemplate(showPageNo) {
+// 页脚模板：页码（居中，由 showPageNo 控制）与数据来源文案+图标（右侧，由 footer 控制）相互独立
+function buildPdfFooterTemplate(showFooter, showPageNo) {
+  let sourceHtml = "";
+  if (showFooter) {
+    const footerIcon = getDefaultPdfFooterIcon();
+    const footerIconHtml = footerIcon
+      ? `<img src="${escapeHtml(
+          footerIcon
+        )}" style="width: 36px; height: 16px; object-fit: contain; margin-left: 6px; position: relative; top: -1px; display: block;" />`
+      : "";
+
+    sourceHtml = `
+      <div style="position: absolute; right: ${PDF_TEMPLATE_HORIZONTAL_PADDING}; bottom: 13px; display: flex; align-items: center; justify-content: flex-end; font-size: 10px; font-weight: 400; line-height: 16px; white-space: nowrap; color: #252b33;">
+        <span>${escapeHtml(PDF_FOOTER_SOURCE_TEXT)}</span>
+        ${footerIconHtml}
+      </div>`;
+  }
+
   return `
     <div style="width: 100%; height: 100%; box-sizing: border-box; position: relative; font-family: Arial, 'Microsoft YaHei', sans-serif;">
       ${buildPdfPageNumberHtml(showPageNo)}
+      ${sourceHtml}
     </div>
   `;
 }
 
-function buildPdfFooterTemplate(showPageNo) {
-  const footerIcon = getDefaultPdfFooterIcon();
-  const footerIconHtml = footerIcon
-    ? `<img src="${escapeHtml(
-        footerIcon
-      )}" style="width: 36px; height: 16px; object-fit: contain; margin-left: 6px; position: relative; top: -1px; display: block;" />`
-    : "";
-
-  return `
-    <div style="width: 100%; height: 100%; box-sizing: border-box; position: relative; font-family: Arial, 'Microsoft YaHei', sans-serif; color: #252b33;">
-      ${buildPdfPageNumberHtml(showPageNo)}
-      <div style="position: absolute; right: ${PDF_TEMPLATE_HORIZONTAL_PADDING}; bottom: 13px; display: flex; align-items: center; justify-content: flex-end; font-size: 10px; font-weight: 400; line-height: 16px; white-space: nowrap;">
-        <span>${escapeHtml(PDF_FOOTER_SOURCE_TEXT)}</span>
-        ${footerIconHtml}
-      </div>
-    </div>
-  `;
-}
-
+// 根据 header（页眉）/footer（页脚）/showPageNo（页码）三个独立开关组装页眉页脚选项
 function applyPdfHeaderFooterOptions(pdfOptions, data) {
-  if (data.version !== "v2") {
-    if (!data.showPageNo) {
-      return {
-        ...pdfOptions,
-        displayHeaderFooter: false,
-      };
-    }
+  const hasHeader = !!data.header;
+  const showFooter = !!data.footer;
+  const showPageNo = !!data.showPageNo;
+  // 页码与数据来源页脚都位于底部边距区域，任一开启都需要保留底部边距
+  const needBottom = showFooter || showPageNo;
 
+  if (!hasHeader && !needBottom) {
     return {
       ...pdfOptions,
-      displayHeaderFooter: true,
-      margin: {
-        bottom: PDF_HEADER_FOOTER_MARGIN.bottom,
-      },
-      headerTemplate: "<span></span>",
-      footerTemplate: buildPdfPageNumberFooterTemplate(data.showPageNo),
+      displayHeaderFooter: false,
     };
+  }
+
+  const margin = {};
+  if (hasHeader) {
+    margin.top = PDF_HEADER_FOOTER_MARGIN.top;
+  }
+  if (needBottom) {
+    margin.bottom = PDF_HEADER_FOOTER_MARGIN.bottom;
   }
 
   return {
     ...pdfOptions,
     displayHeaderFooter: true,
-    margin: PDF_HEADER_FOOTER_MARGIN,
-    headerTemplate: buildPdfHeaderTemplate(data.reportMeta),
-    footerTemplate: buildPdfFooterTemplate(data.showPageNo),
+    margin,
+    headerTemplate: hasHeader
+      ? buildPdfHeaderTemplate(data.header)
+      : "<span></span>",
+    footerTemplate: needBottom
+      ? buildPdfFooterTemplate(showFooter, showPageNo)
+      : "<span></span>",
   };
+}
+
+// 构建 PDF 封面页 HTML：A4 整页铺满封面图，不含页眉页脚
+function buildPdfCoverHtml(coverUrl) {
+  return `<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      @page { size: A4; margin: 0; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; }
+      .pdf-cover { width: 210mm; height: 297mm; overflow: hidden; }
+      .pdf-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    </style>
+  </head>
+  <body>
+    <div class="pdf-cover">
+      <img src="${escapeHtml(coverUrl)}" alt="cover" />
+    </div>
+  </body>
+</html>`;
+}
+
+// 生成单独的封面 PDF（无页眉、页脚、页码）；封面图最多重试 PDF_COVER_MAX_RETRIES 次，
+// 仍拿不到图片则返回 null，不生成封面，避免输出空白封面页
+async function generatePdfCoverBuffer(page, requestId, coverUrl) {
+  logger.info(`[${requestId}] 生成 PDF 封面，封面图：${coverUrl}`);
+
+  let coverImageLoaded = false;
+  for (let attempt = 1; attempt <= PDF_COVER_MAX_RETRIES; attempt++) {
+    try {
+      await page.setContent(buildPdfCoverHtml(coverUrl), {
+        waitUntil: "load",
+        timeout: 5000,
+      });
+      // 校验封面图是否真正加载成功（拿到图片像素），断链/404 时 naturalWidth 为 0
+      coverImageLoaded = await page.evaluate(() => {
+        const img = document.querySelector(".pdf-cover img");
+        return !!img && img.complete && img.naturalWidth > 0;
+      });
+    } catch (err) {
+      coverImageLoaded = false;
+      logger.warn(
+        `[${requestId}] 封面图第 ${attempt}/${PDF_COVER_MAX_RETRIES} 次加载异常：${err.message}`
+      );
+    }
+
+    if (coverImageLoaded) {
+      if (attempt > 1) {
+        logger.info(`[${requestId}] 封面图第 ${attempt} 次重试加载成功`);
+      }
+      break;
+    }
+
+    logger.warn(
+      `[${requestId}] 封面图第 ${attempt}/${PDF_COVER_MAX_RETRIES} 次未加载到图片`
+    );
+  }
+
+  if (!coverImageLoaded) {
+    logger.warn(
+      `[${requestId}] 封面图重试 ${PDF_COVER_MAX_RETRIES} 次仍不可用，跳过封面页`
+    );
+    return null;
+  }
+
+  return page.pdf({
+    format: "A4",
+    printBackground: true,
+    displayHeaderFooter: false,
+    margin: { top: "0px", bottom: "0px", left: "0px", right: "0px" },
+  });
+}
+
+// 将多个 PDF buffer 按顺序合并为一个，页码由各自原始文档决定
+async function mergePdfBuffers(buffers) {
+  const mergedPdf = await PDFDocument.create();
+  for (const buffer of buffers) {
+    const pdfDoc = await PDFDocument.load(buffer);
+    const copiedPages = await mergedPdf.copyPages(
+      pdfDoc,
+      pdfDoc.getPageIndices()
+    );
+    copiedPages.forEach((copiedPage) => mergedPdf.addPage(copiedPage));
+  }
+
+  const mergedBytes = await mergedPdf.save();
+  return Buffer.from(mergedBytes);
 }
 
 // 同样修改 handlePdf 函数
 async function handlePdf(req, res) {
   const requestId = generateRequestId();
   const showPageNo = getPdfShowPageNo(req.body);
+  const footer = getPdfShowFooter(req.body);
+  const header = getPdfHeader(req.body);
+  const coverUrl = getPdfCoverUrl(req.body);
+  const waitTime = getPdfWaitTime(req.body);
   const url = getFirstNonEmptyString(req.body.url);
   const filename = getFirstNonEmptyString(req.body.filename);
 
@@ -1556,26 +1685,20 @@ async function handlePdf(req, res) {
     logger.info(
       `[${requestId}] Starting PDF generation with watermark for ${url}`
     );
-    const version = getPdfVersion(req.body);
-    const reportMeta = getPdfReportMeta(req.body);
-    const versionError = validatePdfVersion(version, reportMeta);
-
-    if (versionError) {
-      logger.info(`[${requestId}] PDF request rejected: ${versionError}`);
-      return res.status(400).json({
-        code: 400,
-        message: versionError,
-        fileName: null,
-        success: false,
-        timestamp: Date.now(),
-        requestId,
-      });
-    }
 
     const cluster = await setupCluster();
 
     const result = await cluster.execute(
-      { url, filename, showPageNo, requestId, version, reportMeta },
+      {
+        url,
+        filename,
+        showPageNo,
+        footer,
+        header,
+        coverUrl,
+        requestId,
+        waitTime,
+      },
       async ({ page, data }) => {
         const deviceName = "iPad Pro";
         const device = mobileDevices[deviceName];
@@ -1647,7 +1770,32 @@ async function handlePdf(req, res) {
           scale: scale,
         }, data);
 
+        // timeOut 参数：抓取完成后、生成 PDF 前再等待指定时间，
+        // 让抓取过程中触发的动态内容/错误提示等有时间消失，避免被打进 PDF
+        if (data.waitTime > 0) {
+          logger.info(
+            `[${data.requestId}] timeOut：抓取完成，等待 ${data.waitTime}ms 后再生成 PDF`
+          );
+          await new Promise((resolve) => setTimeout(resolve, data.waitTime));
+        }
+
         const pdf = await page.pdf(pdfOptions);
+
+        // 传入了封面图地址才尝试添加封面：封面单独成页、无页眉页脚页码，
+        // 拼接在正文前，页码从正文首页开始计算；封面图取不到时跳过，避免空白封面页
+        if (data.coverUrl) {
+          const coverPdf = await generatePdfCoverBuffer(
+            page,
+            data.requestId,
+            data.coverUrl
+          );
+          if (coverPdf) {
+            logger.info(`[${data.requestId}] 已为 PDF 添加封面页`);
+            return mergePdfBuffers([coverPdf, pdf]);
+          }
+          logger.warn(`[${data.requestId}] 封面图不可用，PDF 未添加封面页`);
+        }
+
         return pdf;
       }
     );
@@ -1697,6 +1845,10 @@ async function handlePdf(req, res) {
 async function handleStream(req, res) {
   const requestId = generateRequestId();
   const showPageNo = getPdfShowPageNo(req.body);
+  const footer = getPdfShowFooter(req.body);
+  const header = getPdfHeader(req.body);
+  const coverUrl = getPdfCoverUrl(req.body);
+  const waitTime = getPdfWaitTime(req.body);
   const url = getFirstNonEmptyString(req.body.url);
   const filename = getFirstNonEmptyString(req.body.filename);
 
@@ -1726,28 +1878,20 @@ async function handleStream(req, res) {
     logger.info(
       `[${requestId}] Starting PDF stream generation with watermark for ${url}`
     );
-    const version = getPdfVersion(req.body);
-    const reportMeta = getPdfReportMeta(req.body);
-    const versionError = validatePdfVersion(version, reportMeta);
-
-    if (versionError) {
-      logger.info(
-        `[${requestId}] PDF stream request rejected: ${versionError}`
-      );
-      return res.status(400).json({
-        code: 400,
-        message: versionError,
-        fileName: null,
-        success: false,
-        timestamp: Date.now(),
-        requestId,
-      });
-    }
 
     const cluster = await setupCluster();
 
     const pdfBuffer = await cluster.execute(
-      { url, filename, showPageNo, requestId, version, reportMeta },
+      {
+        url,
+        filename,
+        showPageNo,
+        footer,
+        header,
+        coverUrl,
+        requestId,
+        waitTime,
+      },
       async ({ page, data }) => {
         const deviceName = "iPad Pro";
         const device = mobileDevices[deviceName];
@@ -1819,7 +1963,32 @@ async function handleStream(req, res) {
           scale: scale,
         }, data);
 
+        // timeOut 参数：抓取完成后、生成 PDF 前再等待指定时间，
+        // 让抓取过程中触发的动态内容/错误提示等有时间消失，避免被打进 PDF
+        if (data.waitTime > 0) {
+          logger.info(
+            `[${data.requestId}] timeOut：抓取完成，等待 ${data.waitTime}ms 后再生成 PDF`
+          );
+          await new Promise((resolve) => setTimeout(resolve, data.waitTime));
+        }
+
         const pdf = await page.pdf(pdfOptions);
+
+        // 传入了封面图地址才尝试添加封面：封面单独成页、无页眉页脚页码，
+        // 拼接在正文前，页码从正文首页开始计算；封面图取不到时跳过，避免空白封面页
+        if (data.coverUrl) {
+          const coverPdf = await generatePdfCoverBuffer(
+            page,
+            data.requestId,
+            data.coverUrl
+          );
+          if (coverPdf) {
+            logger.info(`[${data.requestId}] 已为 PDF 添加封面页`);
+            return mergePdfBuffers([coverPdf, pdf]);
+          }
+          logger.warn(`[${data.requestId}] 封面图不可用，PDF 未添加封面页`);
+        }
+
         return pdf;
       }
     );
@@ -1951,10 +2120,11 @@ app.post("/screenshot", (req, res) => {
  *       | --- | --- | --- | --- | --- |
  *       | url | string | 是 | - | 需要转换的网页URL（需包含 http:// 或 https://） |
  *       | filename | string | 是 | - | 保存的文件名（无需包含 .pdf 后缀） |
- *       | version | string | 否 | v1 | PDF版本；v1 无报告页眉和数据来源页脚，v2 显示完整页眉页脚 |
- *       | showPageNo | boolean | 否 | true | 是否显示页码；空值视为未传 |
- *       | reportNumber | string | 否 | - | 报告编号（兼容 reportNo、reportCode）；version=v2 时必填 |
- *       | reportPublishDate | string | 否 | - | 报告发布日期（兼容 reportDate、publishDate）；version=v2 时必填 |
+ *       | header | object | 否 | - | 页眉内容，三栏自由文本 `{ "left": "", "center": "", "right": "" }`（可传对象或 JSON 字符串）；三栏均为空或未传则不显示页眉 |
+ *       | footer | boolean | 否 | false | 是否显示页脚（数据来源文案 + 图标），不含页码 |
+ *       | showPageNo | boolean | 否 | true | 是否显示页码（独立于页脚）；空值视为未传 |
+ *       | cover | string | 否 | - | 封面图网络地址；传了且能取到图才在正文前添加封面页（单独成页、无页眉页脚页码，页码从正文首页计算），取不到或未传则不加封面 |
+ *       | timeOut | number | 否 | 0 | 生成前先等待页面渲染的秒数（最大 60 秒，超出按 60 秒处理） |
  *     tags: [PDF服务]
  *     requestBody:
  *       required: true
@@ -1974,25 +2144,38 @@ app.post("/screenshot", (req, res) => {
  *                 type: string
  *                 description: 保存的文件名（不需要包含.pdf后缀）
  *                 example: "example-report"
- *               version:
- *                 type: string
- *                 description: PDF版本；v1无报告页眉和数据来源页脚（默认），v2显示完整页眉页脚
- *                 enum: [v1, v2]
- *                 default: v1
- *                 example: "v1"
+ *               header:
+ *                 type: object
+ *                 description: 页眉内容，左/中/右三栏自由文本；三栏均为空或未传则不显示页眉。可传对象或 JSON 字符串
+ *                 properties:
+ *                   left:
+ *                     type: string
+ *                     example: "报告编号：BG-2024-001"
+ *                   center:
+ *                     type: string
+ *                     example: ""
+ *                   right:
+ *                     type: string
+ *                     example: "报告发布日期：2024-01-01"
+ *               footer:
+ *                 type: boolean
+ *                 description: 是否显示页脚（数据来源文案+图标），默认false；不含页码
+ *                 default: false
+ *                 example: true
  *               showPageNo:
  *                 type: boolean
- *                 description: 是否显示页码，默认true；空值视为未传
+ *                 description: 是否显示页码（独立于页脚），默认true；空值视为未传
  *                 default: true
  *                 example: true
- *               reportNumber:
+ *               cover:
  *                 type: string
- *                 description: 报告编号（也兼容reportNo、reportCode）；version=v2时必填
- *                 example: "BG-2024-001"
- *               reportPublishDate:
- *                 type: string
- *                 description: 报告发布日期（也兼容reportDate、publishDate）；version=v2时必填
- *                 example: "2024-01-01"
+ *                 description: 封面图网络地址；传了且能取到图才添加封面页（单独成页、无页眉页脚页码，页码从正文首页计算），取不到或未传则不加封面
+ *                 example: "http://192.168.77.215:7001/image/tsl.png"
+ *               timeOut:
+ *                 type: number
+ *                 description: 生成PDF前先等待页面渲染的秒数（最大60秒，超出按60秒处理）
+ *                 default: 0
+ *                 example: 3
  *     responses:
  *       200:
  *         description: PDF生成成功
@@ -2031,10 +2214,11 @@ app.post("/pdf", (req, res) => {
  *       | --- | --- | --- | --- | --- |
  *       | url | string | 是 | - | 需要转换的网页URL（需包含 http:// 或 https://） |
  *       | filename | string | 是 | - | 下载时显示的文件名（无需包含 .pdf 后缀） |
- *       | version | string | 否 | v1 | PDF版本；v1 无报告页眉和数据来源页脚，v2 显示完整页眉页脚 |
- *       | showPageNo | boolean | 否 | true | 是否显示页码；空值视为未传 |
- *       | reportNumber | string | 否 | - | 报告编号（兼容 reportNo、reportCode）；version=v2 时必填 |
- *       | reportPublishDate | string | 否 | - | 报告发布日期（兼容 reportDate、publishDate）；version=v2 时必填 |
+ *       | header | object | 否 | - | 页眉内容，三栏自由文本 `{ "left": "", "center": "", "right": "" }`（可传对象或 JSON 字符串）；三栏均为空或未传则不显示页眉 |
+ *       | footer | boolean | 否 | false | 是否显示页脚（数据来源文案 + 图标），不含页码 |
+ *       | showPageNo | boolean | 否 | true | 是否显示页码（独立于页脚）；空值视为未传 |
+ *       | cover | string | 否 | - | 封面图网络地址；传了且能取到图才在正文前添加封面页（单独成页、无页眉页脚页码，页码从正文首页计算），取不到或未传则不加封面 |
+ *       | timeOut | number | 否 | 0 | 生成前先等待页面渲染的秒数（最大 60 秒，超出按 60 秒处理） |
  *     tags: [PDF服务]
  *     requestBody:
  *       required: true
@@ -2054,25 +2238,38 @@ app.post("/pdf", (req, res) => {
  *                 type: string
  *                 description: 下载时显示的文件名（不需要包含.pdf后缀）
  *                 example: "example-report"
- *               version:
- *                 type: string
- *                 description: PDF版本；v1无报告页眉和数据来源页脚（默认），v2显示完整页眉页脚
- *                 enum: [v1, v2]
- *                 default: v1
- *                 example: "v1"
+ *               header:
+ *                 type: object
+ *                 description: 页眉内容，左/中/右三栏自由文本；三栏均为空或未传则不显示页眉。可传对象或 JSON 字符串
+ *                 properties:
+ *                   left:
+ *                     type: string
+ *                     example: "报告编号：BG-2024-001"
+ *                   center:
+ *                     type: string
+ *                     example: ""
+ *                   right:
+ *                     type: string
+ *                     example: "报告发布日期：2024-01-01"
+ *               footer:
+ *                 type: boolean
+ *                 description: 是否显示页脚（数据来源文案+图标），默认false；不含页码
+ *                 default: false
+ *                 example: true
  *               showPageNo:
  *                 type: boolean
- *                 description: 是否显示页码，默认true；空值视为未传
+ *                 description: 是否显示页码（独立于页脚），默认true；空值视为未传
  *                 default: true
  *                 example: true
- *               reportNumber:
+ *               cover:
  *                 type: string
- *                 description: 报告编号（也兼容reportNo、reportCode）；version=v2时必填
- *                 example: "BG-2024-001"
- *               reportPublishDate:
- *                 type: string
- *                 description: 报告发布日期（也兼容reportDate、publishDate）；version=v2时必填
- *                 example: "2024-01-01"
+ *                 description: 封面图网络地址；传了且能取到图才添加封面页（单独成页、无页眉页脚页码，页码从正文首页计算），取不到或未传则不加封面
+ *                 example: "http://192.168.77.215:7001/image/tsl.png"
+ *               timeOut:
+ *                 type: number
+ *                 description: 生成PDF前先等待页面渲染的秒数（最大60秒，超出按60秒处理）
+ *                 default: 0
+ *                 example: 3
  *     responses:
  *       200:
  *         description: PDF流生成成功
@@ -2944,20 +3141,20 @@ const startServer = async () => {
       console.log("2. POST /pdf");
       console.log("   Required parameters: url, filename");
       console.log(
-        "   Optional parameters: version (v1 default without report header/source footer, v2 with full header/footer), showPageNo (default true), reportNumber/reportNo/reportCode, reportPublishDate/reportDate/publishDate."
+        "   Optional parameters: header (object {left, center, right} free-text header, or JSON string; omitted/all-empty = no header), footer (boolean, default false; shows the source-text footer, page number excluded), showPageNo (default true; independent page-number switch), cover (image URL; a cover page is prepended only when the URL is provided AND the image loads - no header/footer/page number on it, page numbering starts from the first body page; not passed or unreachable = no cover), timeOut (seconds to wait before generating, max 60)."
       );
       console.log("   【必填参数: url, filename】");
       console.log(
-        "   【可选参数: version（默认v1无报告页眉和数据来源页脚；v2有完整页头页脚，且必须传报告编号和报告发布日期）、showPageNo（默认true，传false隐藏页码）、reportNumber/reportNo/reportCode、reportPublishDate/reportDate/publishDate】"
+        "   【可选参数: header（页眉对象 {left, center, right} 三栏自由文本，也可传JSON字符串；未传或三栏全空则不显示页眉）、footer（布尔，默认false；显示数据来源页脚，不含页码）、showPageNo（默认true，独立的页码开关，传false隐藏页码）、cover（封面图网络地址；传了且能取到图才在正文前加封面页，封面无页眉页脚页码、页码从正文首页计算，取不到或未传则不加封面）、timeOut（生成前等待页面渲染的秒数，最大60秒）】"
       );
       console.log("3. POST /pdf/stream");
       console.log("   Required parameters: url, filename");
       console.log(
-        "   Optional parameters: version (v1 default without report header/source footer, v2 with full header/footer), showPageNo (default true), reportNumber/reportNo/reportCode, reportPublishDate/reportDate/publishDate."
+        "   Optional parameters: header (object {left, center, right} free-text header, or JSON string; omitted/all-empty = no header), footer (boolean, default false; shows the source-text footer, page number excluded), showPageNo (default true; independent page-number switch), cover (image URL; a cover page is prepended only when the URL is provided AND the image loads - no header/footer/page number on it, page numbering starts from the first body page; not passed or unreachable = no cover), timeOut (seconds to wait before generating, max 60)."
       );
       console.log("   【必填参数: url, filename】");
       console.log(
-        "   【可选参数: version（默认v1无报告页眉和数据来源页脚；v2有完整页头页脚，且必须传报告编号和报告发布日期）、showPageNo（默认true，传false隐藏页码）、reportNumber/reportNo/reportCode、reportPublishDate/reportDate/publishDate】"
+        "   【可选参数: header（页眉对象 {left, center, right} 三栏自由文本，也可传JSON字符串；未传或三栏全空则不显示页眉）、footer（布尔，默认false；显示数据来源页脚，不含页码）、showPageNo（默认true，独立的页码开关，传false隐藏页码）、cover（封面图网络地址；传了且能取到图才在正文前加封面页，封面无页眉页脚页码、页码从正文首页计算，取不到或未传则不加封面）、timeOut（生成前等待页面渲染的秒数，最大60秒）】"
       );
 
       // 在测试模式下显示压力测试端点
