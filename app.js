@@ -324,6 +324,14 @@ async function setupCluster() {
         "--disable-gpu",
         "--disable-web-security",
         "--disable-features=IsolateOrigins,site-per-process",
+        "--disable-extensions",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-hang-monitor",
+        "--mute-audio",
       ],
       timeout: 180000,
       protocolTimeout: 180000,
@@ -364,6 +372,14 @@ async function prepareStandbyCluster() {
           "--disable-gpu",
           "--disable-web-security",
           "--disable-features=IsolateOrigins,site-per-process",
+          "--disable-extensions",
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--disable-background-timer-throttling",
+          "--disable-backgrounding-occluded-windows",
+          "--disable-renderer-backgrounding",
+          "--disable-hang-monitor",
+          "--mute-audio",
         ],
         timeout: 180000,
         protocolTimeout: 180000,
@@ -1045,19 +1061,6 @@ async function handleScreenshot(req, res) {
         page.setDefaultTimeout(180000);
         page.setDefaultNavigationTimeout(180000);
 
-        await page.setRequestInterception(true);
-        page.on("request", (request) => {
-          if (
-            ["image", "stylesheet", "font"].includes(request.resourceType())
-          ) {
-            request.continue();
-          } else if (request.resourceType() === "script") {
-            request.continue();
-          } else {
-            request.continue();
-          }
-        });
-
         await page.goto(data.url, {
           waitUntil: ["load", "domcontentloaded", "networkidle0"],
           timeout: 180000,
@@ -1142,7 +1145,120 @@ async function handleScreenshot(req, res) {
   }
 }
 
-async function captureFullPage(page, requestId) {
+// getData 等待配置：抓取期间若触发了 /reportView/getData，则最多等它完成的上限（毫秒）
+const PDF_GETDATA_TIMEOUT = parseInt(process.env.PDF_GETDATA_TIMEOUT || "15000");
+// 滚动结束后给可能略微延迟触发的 getData 一个短暂出现窗口；窗口内仍无则按内容已就绪放行
+const PDF_GETDATA_IDLE_GRACE = parseInt(
+  process.env.PDF_GETDATA_IDLE_GRACE || "1500"
+);
+
+// 监听 /reportView/getData 请求并返回一个可控等待器。
+// 相比旧逻辑：监听在任何滚动之前注册，修复“导航/滚动期触发的 getData 被漏检”的竞态；
+// 且“全程未出现 getData”或“出现但超时未完成”一律 resolve 放行，不再 reject 后白等 30s。
+function createGetDataWaiter(page, requestId, timeoutMs) {
+  let isGetDataFound = false;
+  let requestCount = 0;
+  let lastRequest = null;
+  let pendingRequest = null;
+  let resolveFn;
+  let rejectFn;
+
+  const promise = new Promise((resolve, reject) => {
+    resolveFn = resolve;
+    rejectFn = reject;
+  });
+
+  // 监听所有请求
+  const onRequest = (request) => {
+    if (request.url().includes("/reportView/getData")) {
+      requestCount++;
+      isGetDataFound = true;
+      lastRequest = request;
+      pendingRequest = request;
+      logger.info(
+        `[${requestId}] getData request #${requestCount} detected: ${request.url()}`
+      );
+    }
+  };
+  // 监听请求完成
+  const onFinished = (request) => {
+    if (request === pendingRequest) {
+      if (request === lastRequest) {
+        logger.info(
+          `[${requestId}] Last getData request #${requestCount} finished successfully`
+        );
+        resolveFn();
+      } else {
+        logger.info(
+          `[${requestId}] getData request #${requestCount} finished, but not the last one`
+        );
+      }
+      pendingRequest = null;
+    }
+  };
+  // 监听请求失败
+  const onFailed = (request) => {
+    if (request === pendingRequest) {
+      const error = request.failure();
+      logger.error(
+        `[${requestId}] getData request #${requestCount} failed: ${
+          error?.errorText || "Unknown error"
+        }`
+      );
+      if (request === lastRequest) {
+        rejectFn(
+          new Error(
+            `Last getData request failed: ${error?.errorText || "Unknown error"}`
+          )
+        );
+      }
+      pendingRequest = null;
+    }
+  };
+
+  page.on("request", onRequest);
+  page.on("requestfinished", onFinished);
+  page.on("requestfailed", onFailed);
+
+  // 兜底：出现过 getData 但迟迟未完成时，最多等 timeoutMs 后放行（不再 reject）
+  const timer = setTimeout(() => {
+    if (pendingRequest) {
+      logger.warn(
+        `[${requestId}] getData request #${requestCount} 未在 ${timeoutMs}ms 内完成，继续生成`
+      );
+    }
+    resolveFn();
+  }, timeoutMs);
+
+  // 等待结束后清理监听器与定时器，避免长跑下堆积
+  promise
+    .catch(() => {})
+    .finally(() => {
+      clearTimeout(timer);
+      page.off("request", onRequest);
+      page.off("requestfinished", onFinished);
+      page.off("requestfailed", onFailed);
+    });
+
+  return {
+    promise,
+    hasGetData: () => isGetDataFound,
+    // 抓取结束时若仍未出现 getData，给一个短暂出现窗口后放行
+    settleIdle: () => {
+      setTimeout(() => {
+        if (!isGetDataFound) {
+          resolveFn();
+        }
+      }, PDF_GETDATA_IDLE_GRACE);
+    },
+  };
+}
+
+// 仅做滚动/懒加载/撑视口/等 getData，不截图（供 PDF 流程复用，避免生成被丢弃的全页截图）
+async function preparePageForPdf(page, requestId) {
+  // 在任何滚动之前就注册 getData 监听，避免漏掉滚动阶段触发的请求（修复竞态）
+  const getDataWaiter = createGetDataWaiter(page, requestId, PDF_GETDATA_TIMEOUT);
+
   // 滚动到底部以触发懒加载内容
   await autoScroll(page);
 
@@ -1164,107 +1280,43 @@ async function captureFullPage(page, requestId) {
     height: maxHeight,
   });
 
-  // 在 final autoScroll 之前开始监听 getData 请求
-  const waitForGetData = new Promise((resolve, reject) => {
-    let getDataRequest = null;
-    let isGetDataFound = false;
-    let requestCount = 0;
-    let lastRequest = null;
-    let pendingRequest = null;
-    let resolvePromise = resolve;
-
-    // 监听所有请求
-    page.on("request", (request) => {
-      if (request.url().includes("/reportView/getData")) {
-        requestCount++;
-        isGetDataFound = true;
-        lastRequest = request;
-        pendingRequest = request;
-        getDataRequest = request;
-        logger.info(
-          `[${requestId}] getData request #${requestCount} detected: ${request.url()}`
-        );
-      }
-    });
-
-    // 监听请求完成
-    page.on("requestfinished", (request) => {
-      if (request === pendingRequest) {
-        if (request === lastRequest) {
-          logger.info(
-            `[${requestId}] Last getData request #${requestCount} finished successfully`
-          );
-          resolvePromise();
-        } else {
-          logger.info(
-            `[${requestId}] getData request #${requestCount} finished, but not the last one`
-          );
-        }
-        pendingRequest = null;
-      }
-    });
-
-    // 监听请求失败
-    page.on("requestfailed", (request) => {
-      if (request === pendingRequest) {
-        const error = request.failure();
-        logger.error(
-          `[${requestId}] getData request #${requestCount} failed: ${
-            error?.errorText || "Unknown error"
-          }`
-        );
-        if (request === lastRequest) {
-          reject(
-            new Error(
-              `Last getData request failed: ${
-                error?.errorText || "Unknown error"
-              }`
-            )
-          );
-        }
-        pendingRequest = null;
-      }
-    });
-
-    // 设置超时检查
-    setTimeout(() => {
-      if (!isGetDataFound) {
-        logger.error(
-          `[${requestId}] No getData request found within 30 seconds`
-        );
-        reject(new Error("getData request not found within 30 seconds"));
-      } else if (pendingRequest) {
-        logger.error(
-          `[${requestId}] Last getData request #${requestCount} did not complete within timeout`
-        );
-        reject(new Error("Last getData request timed out"));
-      }
-    }, 30000);
-  });
-
   // 再次滚动到底部确保所有内容都已加载
   logger.info(`[${requestId}] Starting final autoScroll`);
   await autoScroll(page);
   logger.info(`[${requestId}] After final autoScroll - URL: ${page.url()}`);
 
-  // 检查getData请求状态
+  // 检查 getData 请求状态：
+  // - 抓取全程未出现 getData（页面无该接口，或导航期已随 networkidle0 完成）→ 立即放行，不再白等
+  // - 出现过 getData → 等其完成，最多等 PDF_GETDATA_TIMEOUT
   logger.info(`[${requestId}] Checking getData request status...`);
-  try {
+  if (!getDataWaiter.hasGetData()) {
+    logger.info(
+      `[${requestId}] 未检测到 getData 请求，按内容已就绪继续（最多再等 ${PDF_GETDATA_IDLE_GRACE}ms）`
+    );
+    getDataWaiter.settleIdle();
+  } else {
     logger.info(
       `[${requestId}] Waiting for last getData request to complete...`
     );
-    await waitForGetData;
+  }
+  try {
+    await getDataWaiter.promise;
     await new Promise((resolve) => setTimeout(resolve, 500));
-    logger.info(
-      `[${requestId}] Last getData request completed successfully, proceeding with screenshot`
-    );
+    logger.info(`[${requestId}] getData 处理完成，继续生成`);
   } catch (error) {
     logger.error(`[${requestId}] Error waiting for getData: ${error.message}`);
     // 记录错误但不中断整个流程
-    logger.warn(`[${requestId}] 尝试继续执行截图操作，即使getData请求失败`);
+    logger.warn(`[${requestId}] 尝试继续执行，即使getData请求失败`);
     // 稍微等待一下以确保页面是稳定的
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
+
+  return maxHeight;
+}
+
+// 截图端点：复用 preparePageForPdf 完成抓取后再截全页图
+async function captureFullPage(page, requestId) {
+  const maxHeight = await preparePageForPdf(page, requestId);
 
   // 捕获整个页面的截图
   logger.info(`[${requestId}] Capturing screenshot with height: ${maxHeight}`);
@@ -1283,16 +1335,20 @@ async function autoScroll(page) {
   await page.evaluate(async () => {
     await new Promise((resolve) => {
       let totalHeight = 0;
-      const distance = 1000; // 增加滚动距离
+      const distance = 1500; // 每步滚动距离（加大以减少步数）
+      const maxScroll = 200000; // 滚动上限，防止边滚边长高导致步数失控
       const timer = setInterval(() => {
         window.scrollBy(0, distance);
         totalHeight += distance;
 
-        if (totalHeight >= document.body.scrollHeight) {
+        if (
+          totalHeight >= document.body.scrollHeight ||
+          totalHeight >= maxScroll
+        ) {
           clearInterval(timer);
           resolve();
         }
-      }, 50); // 减少间隔时间
+      }, 30); // 缩短间隔（仍保留时间片让懒加载/请求触发）
     });
   });
 }
@@ -1337,7 +1393,15 @@ const PDF_TEMPLATE_HORIZONTAL_PADDING = "36px";
 const PDF_FOOTER_SOURCE_TEXT = "数据来源：中经互联网络有限公司所属";
 const PDF_FOOTER_ICON_PATH = path.join(ASSETS_DIR, "cxm_foot_icon.png");
 // 封面图加载的最大重试次数，重试用尽仍拿不到图片则跳过封面
-const PDF_COVER_MAX_RETRIES = 3;
+const PDF_COVER_MAX_RETRIES = parseInt(process.env.PDF_COVER_MAX_RETRIES || "2");
+// 单次封面图加载超时（毫秒）
+const PDF_COVER_LOAD_TIMEOUT = parseInt(
+  process.env.PDF_COVER_LOAD_TIMEOUT || "3000"
+);
+// 封面生成整体硬上限（毫秒）：无论重试/加载多慢，超过即跳过封面，避免拖垮总时长
+const PDF_COVER_TOTAL_TIMEOUT = parseInt(
+  process.env.PDF_COVER_TOTAL_TIMEOUT || "8000"
+);
 // timeOut 参数最大等待时间（毫秒），避免触发请求超时
 const PDF_MAX_WAIT_TIME = 60 * 1000;
 let cachedPdfFooterIcon = null;
@@ -1590,7 +1654,7 @@ async function generatePdfCoverBuffer(page, requestId, coverUrl) {
     try {
       await page.setContent(buildPdfCoverHtml(coverUrl), {
         waitUntil: "load",
-        timeout: 5000,
+        timeout: PDF_COVER_LOAD_TIMEOUT,
       });
       // 校验封面图是否真正加载成功（拿到图片像素），断链/404 时 naturalWidth 为 0
       coverImageLoaded = await page.evaluate(() => {
@@ -1705,12 +1769,6 @@ async function handlePdf(req, res) {
         await page.setUserAgent(device.userAgent);
         await page.setViewport(device.viewport);
 
-        // 启用请求拦截
-        await page.setRequestInterception(true);
-        page.on("request", (request) => {
-          request.continue();
-        });
-
         // 导航到页面
         logger.info(`[${data.requestId}] Navigating to page: ${data.url}`);
         await page.goto(data.url, {
@@ -1725,8 +1783,8 @@ async function handlePdf(req, res) {
           }] Before capture - URL: ${page.url()}, Title: ${await page.title()}`
         );
 
-        // 执行页面捕获
-        await captureFullPage(page, data.requestId);
+        // 执行页面准备（滚动/懒加载/等待数据）；PDF 由 page.pdf 独立渲染，无需截图
+        await preparePageForPdf(page, data.requestId);
 
         // 注入水印样式
         await page.evaluate((waterMarkData) => {
@@ -1783,11 +1841,17 @@ async function handlePdf(req, res) {
         // 传入了封面图地址才尝试添加封面：封面单独成页、无页眉页脚页码，
         // 拼接在正文前，页码从正文首页开始计算；封面图取不到时跳过，避免空白封面页
         if (data.coverUrl) {
-          const coverPdf = await generatePdfCoverBuffer(
-            page,
-            data.requestId,
-            data.coverUrl
-          );
+          const coverPdf = await Promise.race([
+            generatePdfCoverBuffer(page, data.requestId, data.coverUrl),
+            new Promise((resolve) =>
+              setTimeout(() => {
+                logger.warn(
+                  `[${data.requestId}] 封面生成超过 ${PDF_COVER_TOTAL_TIMEOUT}ms，跳过封面页`
+                );
+                resolve(null);
+              }, PDF_COVER_TOTAL_TIMEOUT)
+            ),
+          ]);
           if (coverPdf) {
             logger.info(`[${data.requestId}] 已为 PDF 添加封面页`);
             return mergePdfBuffers([coverPdf, pdf]);
@@ -1898,12 +1962,6 @@ async function handleStream(req, res) {
         await page.setUserAgent(device.userAgent);
         await page.setViewport(device.viewport);
 
-        // 启用请求拦截
-        await page.setRequestInterception(true);
-        page.on("request", (request) => {
-          request.continue();
-        });
-
         // 导航到页面
         logger.info(`[${data.requestId}] Navigating to page: ${data.url}`);
         await page.goto(data.url, {
@@ -1918,8 +1976,8 @@ async function handleStream(req, res) {
           }] Before capture - URL: ${page.url()}, Title: ${await page.title()}`
         );
 
-        // 执行页面捕获
-        await captureFullPage(page, data.requestId);
+        // 执行页面准备（滚动/懒加载/等待数据）；PDF 由 page.pdf 独立渲染，无需截图
+        await preparePageForPdf(page, data.requestId);
 
         // 注入水印样式
         await page.evaluate((waterMarkData) => {
@@ -1976,11 +2034,17 @@ async function handleStream(req, res) {
         // 传入了封面图地址才尝试添加封面：封面单独成页、无页眉页脚页码，
         // 拼接在正文前，页码从正文首页开始计算；封面图取不到时跳过，避免空白封面页
         if (data.coverUrl) {
-          const coverPdf = await generatePdfCoverBuffer(
-            page,
-            data.requestId,
-            data.coverUrl
-          );
+          const coverPdf = await Promise.race([
+            generatePdfCoverBuffer(page, data.requestId, data.coverUrl),
+            new Promise((resolve) =>
+              setTimeout(() => {
+                logger.warn(
+                  `[${data.requestId}] 封面生成超过 ${PDF_COVER_TOTAL_TIMEOUT}ms，跳过封面页`
+                );
+                resolve(null);
+              }, PDF_COVER_TOTAL_TIMEOUT)
+            ),
+          ]);
           if (coverPdf) {
             logger.info(`[${data.requestId}] 已为 PDF 添加封面页`);
             return mergePdfBuffers([coverPdf, pdf]);
