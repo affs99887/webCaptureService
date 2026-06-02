@@ -19,6 +19,9 @@
       "node18-linux-x64"
     ],
     "outputPath": "dist",
+    "assets": [
+      "src/assets/**/*"
+    ],
     "options": {
       "preBundle": true
     }

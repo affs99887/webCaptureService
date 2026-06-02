@@ -1317,10 +1317,14 @@ async function getPageHeight(page) {
   return page.evaluate(() => document.documentElement.scrollHeight);
 }
 
+// 资源目录：用 __dirname 而非 process.cwd()，保证 pkg 打包后能从快照文件系统读取
+// （需同步在 package.json 的 pkg.assets 声明 src/assets/**/*，否则资源不会被打进 exe）
+const ASSETS_DIR = path.join(__dirname, "src", "assets");
+
 const waterMark =
   "data:image/png;base64," +
   fs
-    .readFileSync(path.join(process.cwd(), "src", "assets", "watermark.png"))
+    .readFileSync(path.join(ASSETS_DIR, "watermark.png"))
     .toString("base64");
 
 const PDF_HEADER_FOOTER_MARGIN = {
@@ -1331,12 +1335,7 @@ const PDF_HEADER_FOOTER_MARGIN = {
 };
 const PDF_TEMPLATE_HORIZONTAL_PADDING = "36px";
 const PDF_FOOTER_SOURCE_TEXT = "数据来源：中经互联网络有限公司所属";
-const PDF_FOOTER_ICON_PATH = path.join(
-  process.cwd(),
-  "src",
-  "assets",
-  "cxm_foot_icon.png"
-);
+const PDF_FOOTER_ICON_PATH = path.join(ASSETS_DIR, "cxm_foot_icon.png");
 // 封面图加载的最大重试次数，重试用尽仍拿不到图片则跳过封面
 const PDF_COVER_MAX_RETRIES = 3;
 // timeOut 参数最大等待时间（毫秒），避免触发请求超时
